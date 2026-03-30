@@ -1,0 +1,6 @@
+secret.key
+finance.db
+*.db-shm
+*.db-wal
+*.db-journal
+__pycache__/

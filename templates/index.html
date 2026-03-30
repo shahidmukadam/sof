@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>State of Finance</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+  <style>
+    [x-cloak] { display: none !important; }
+    .tab-btn.active { @apply border-b-2 border-indigo-400 text-indigo-400; }
+    .auth-tab.active { background: rgba(99, 102, 241, 0.18); color: #e2e8f0; border-color: rgba(99, 102, 241, 0.4); }
+    input[type=color] { height: 2.25rem; padding: 0.2rem; cursor: pointer; }
+    .progress-bar { transition: width 0.5s ease; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #1e293b; }
+    ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-full font-sans">
+
+  <section id="authShell" class="min-h-screen px-6 py-10">
+    <div class="max-w-5xl mx-auto grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
+      <div class="bg-slate-800 rounded-3xl border border-slate-700 shadow-xl p-8">
+        <div class="mb-8">
+          <p class="text-sm uppercase tracking-[0.35em] text-indigo-300/80 mb-3">Local Finance Hub</p>
+          <h1 class="text-4xl font-bold text-white">State of Finance</h1>
+          <p class="text-slate-400 mt-3 max-w-2xl">
+            Sign in to your finance profile, or create a new local account with OTP verification. OTPs stay on this desktop for now.
+          </p>
+        </div>
+
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-6">
+          <button class="auth-tab border border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-400 transition-colors" data-auth-tab="signin" onclick="switchAuthTab('signin')">Sign In</button>
+          <button class="auth-tab border border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-400 transition-colors" data-auth-tab="signup" onclick="switchAuthTab('signup')">Sign Up</button>
+          <button class="auth-tab border border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-400 transition-colors" data-auth-tab="activate" onclick="switchAuthTab('activate')">Activate Existing</button>
+          <button class="auth-tab border border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-400 transition-colors" data-auth-tab="forgot" onclick="switchAuthTab('forgot')">Forgot Password</button>
+        </div>
+
+        <div id="authStatus" class="hidden rounded-xl border px-4 py-3 text-sm mb-5"></div>
+
+        <div id="authPanel-signin" class="space-y-4">
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Email</label>
+            <input id="signInEmail" type="email" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+          </div>
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Password</label>
+            <input id="signInPassword" type="password" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+          </div>
+          <button onclick="signIn()" class="w-full bg-indigo-600 hover:bg-indigo-500 py-2.5 rounded-lg text-sm font-medium transition-colors">Sign In</button>
+        </div>
+
+        <div id="authPanel-signup" class="space-y-4 hidden">
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Profile Name</label>
+            <input id="signUpName" type="text" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+          </div>
+          <div class="grid md:grid-cols-2 gap-4">
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">Email</label>
+              <input id="signUpEmail" type="email" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+            </div>
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">Password</label>
+              <input id="signUpPassword" type="password" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+            </div>
+          </div>
+          <div class="flex flex-wrap gap-3">
+            <button id="signUpSendOtpBtn" onclick="startSignUp()" class="bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded-lg text-sm font-medium transition-colors">Send OTP</button>
+            <button id="signUpResendBtn" onclick="startSignUp(true)" class="hidden bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm transition-colors">Resend OTP</button>
+          </div>
+          <div id="signUpOtpSection" class="hidden border-t border-slate-700 pt-4 space-y-3">
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">OTP</label>
+              <input id="signUpCode" type="text" inputmode="numeric" maxlength="6" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm tracking-[0.3em] focus:outline-none focus:border-indigo-500" />
+            </div>
+            <button onclick="verifySignUp()" class="w-full bg-emerald-600 hover:bg-emerald-500 py-2.5 rounded-lg text-sm font-medium transition-colors">Verify And Create Account</button>
+          </div>
+        </div>
+
+        <div id="authPanel-activate" class="space-y-4 hidden">
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Existing Profile</label>
+            <select id="activateProfileSelect" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500">
+              <option value="">Loading...</option>
+            </select>
+          </div>
+          <div class="grid md:grid-cols-2 gap-4">
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">Email</label>
+              <input id="activateEmail" type="email" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+            </div>
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">Password</label>
+              <input id="activatePassword" type="password" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+            </div>
+          </div>
+          <div class="flex flex-wrap gap-3">
+            <button id="activateSendOtpBtn" onclick="startActivateExisting()" class="bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded-lg text-sm font-medium transition-colors">Send OTP</button>
+            <button id="activateResendBtn" onclick="startActivateExisting(true)" class="hidden bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm transition-colors">Resend OTP</button>
+          </div>
+          <div id="activateOtpSection" class="hidden border-t border-slate-700 pt-4 space-y-3">
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">OTP</label>
+              <input id="activateCode" type="text" inputmode="numeric" maxlength="6" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm tracking-[0.3em] focus:outline-none focus:border-indigo-500" />
+            </div>
+            <button onclick="verifyActivateExisting()" class="w-full bg-emerald-600 hover:bg-emerald-500 py-2.5 rounded-lg text-sm font-medium transition-colors">Verify And Link Profile</button>
+          </div>
+        </div>
+
+        <div id="authPanel-forgot" class="space-y-4 hidden">
+          <div class="grid md:grid-cols-2 gap-4">
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">Email</label>
+              <input id="forgotEmail" type="email" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+            </div>
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">New Password</label>
+              <input id="forgotPassword" type="password" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+            </div>
+          </div>
+          <div class="flex flex-wrap gap-3">
+            <button id="forgotSendOtpBtn" onclick="startForgotPassword()" class="bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded-lg text-sm font-medium transition-colors">Send OTP</button>
+            <button id="forgotResendBtn" onclick="startForgotPassword(true)" class="hidden bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm transition-colors">Resend OTP</button>
+          </div>
+          <div id="forgotOtpSection" class="hidden border-t border-slate-700 pt-4 space-y-3">
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">OTP</label>
+              <input id="forgotCode" type="text" inputmode="numeric" maxlength="6" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm tracking-[0.3em] focus:outline-none focus:border-indigo-500" />
+            </div>
+            <button onclick="verifyForgotPassword()" class="w-full bg-emerald-600 hover:bg-emerald-500 py-2.5 rounded-lg text-sm font-medium transition-colors">Verify And Reset Password</button>
+          </div>
+        </div>
+      </div>
+
+      <aside class="bg-slate-800 rounded-3xl border border-slate-700 shadow-xl p-8">
+        <div class="mb-6">
+          <p class="text-xs uppercase tracking-[0.35em] text-slate-500 mb-3">Local OTP Inbox</p>
+          <h2 class="text-2xl font-semibold text-white">Desktop-only delivery</h2>
+          <p class="text-slate-400 mt-3">
+            OTPs are not emailed yet. They appear here so you can finish sign up, activation, or password reset locally.
+          </p>
+        </div>
+
+        <div id="localOtpEmpty" class="rounded-2xl border border-dashed border-slate-700 bg-slate-900/40 px-5 py-8 text-sm text-slate-500">
+          Request an OTP from one of the auth flows to see it here.
+        </div>
+
+        <div id="localOtpPanel" class="hidden space-y-4">
+          <div class="rounded-2xl border border-indigo-500/30 bg-indigo-500/10 px-5 py-4">
+            <p id="localOtpTitle" class="text-sm font-medium text-indigo-200"></p>
+            <p id="localOtpMeta" class="text-xs text-indigo-100/80 mt-1"></p>
+          </div>
+          <div class="rounded-2xl border border-slate-700 bg-slate-900/60 px-5 py-6 text-center">
+            <p class="text-xs uppercase tracking-[0.35em] text-slate-500 mb-3">OTP Code</p>
+            <p id="localOtpCode" class="text-4xl font-bold tracking-[0.35em] text-white">------</p>
+          </div>
+          <div class="rounded-2xl border border-slate-700 bg-slate-900/40 px-5 py-4">
+            <p id="localOtpCountdown" class="text-sm text-slate-300"></p>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <div id="appShell" class="hidden">
+    <header class="border-b border-slate-700 bg-slate-800 px-6 py-4 flex items-center justify-between">
+      <div>
+        <h1 class="text-xl font-bold text-white">State of Finance</h1>
+        <p id="lastUpdated" class="text-xs text-slate-400 mt-0.5"></p>
+      </div>
+      <div class="flex items-center gap-3">
+        <div class="hidden md:block text-right">
+          <p class="text-[11px] uppercase tracking-wide text-slate-500">Signed In</p>
+          <p id="sessionUserName" class="text-sm font-medium text-slate-200"></p>
+        </div>
+        <select id="scopeSelect" onchange="onScopeChange()" aria-label="Scope selector" class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-indigo-500">
+          <option value="me">My Profile</option>
+          <option value="all">All Users</option>
+        </select>
+        <div class="flex items-center gap-1.5">
+          <div class="bg-slate-700 rounded-lg p-0.5 flex">
+            <button id="btn-AED" onclick="setCurrency('AED')" class="currency-btn px-3 py-1.5 rounded-md text-sm font-medium transition-colors bg-slate-600 text-white">د.إ AED</button>
+            <button id="btn-INR" onclick="setCurrency('INR')" class="currency-btn px-3 py-1.5 rounded-md text-sm font-medium transition-colors text-slate-400 hover:text-white">₹ INR</button>
+          </div>
+          <span id="rateLabel" class="text-xs text-slate-500"></span>
+        </div>
+        <button id="mainAddEntryBtn" onclick="openAddEntry()" class="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
+          + Add Balance Entry
+        </button>
+        <button id="logoutBtn" onclick="logout()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-4 py-2 rounded-lg text-sm transition-colors">
+          Logout
+        </button>
+      </div>
+    </header>
+
+    <nav class="border-b border-slate-700 bg-slate-800 px-6">
+      <div class="flex gap-1">
+        <button data-tab="dashboard" class="tab-btn active px-4 py-3 text-sm font-medium text-slate-300 hover:text-white transition-colors" onclick="switchTab('dashboard')">Dashboard</button>
+        <button data-tab="accounts" class="tab-btn px-4 py-3 text-sm font-medium text-slate-300 hover:text-white transition-colors" onclick="switchTab('accounts')">Assets</button>
+        <button data-tab="buckets" class="tab-btn px-4 py-3 text-sm font-medium text-slate-300 hover:text-white transition-colors" onclick="switchTab('buckets')">Buckets</button>
+        <button data-tab="timeline" class="tab-btn px-4 py-3 text-sm font-medium text-slate-300 hover:text-white transition-colors" onclick="switchTab('timeline')">Timeline</button>
+        <button data-tab="transactions" class="tab-btn px-4 py-3 text-sm font-medium text-slate-300 hover:text-white transition-colors" onclick="switchTab('transactions')">Transactions</button>
+      </div>
+    </nav>
+
+    <main class="p-6 max-w-6xl mx-auto">
+      <section id="tab-dashboard">
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+          <div class="bg-slate-800 rounded-xl p-5 md:col-span-2">
+            <p class="text-slate-400 text-sm">Total Net Worth</p>
+            <p id="netWorthTotal" class="text-4xl font-bold text-white mt-1">—</p>
+            <div class="mt-4 inline-flex items-center gap-3 rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3">
+              <div>
+                <p class="text-[11px] uppercase tracking-wide text-emerald-300/80">Unallocated Cash</p>
+                <p id="unallocatedCashTotal" class="text-lg font-semibold text-emerald-300">—</p>
+              </div>
+            </div>
+            <div class="mt-4 grid grid-cols-2 gap-3" id="byTypeBreakdown"></div>
+          </div>
+          <div class="bg-slate-800 rounded-xl p-5 flex flex-col">
+            <p class="text-slate-400 text-sm mb-3">By Asset Type</p>
+            <div class="flex-1 flex items-center justify-center">
+              <canvas id="donutChart" width="160" height="160"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <div class="bg-slate-800 rounded-xl p-5 mb-6">
+          <h2 class="text-sm font-medium text-slate-400 mb-4">Bucket Allocations</h2>
+          <div id="bucketSummary" class="space-y-3"></div>
+          <p id="bucketEmpty" class="text-slate-500 text-sm hidden">No buckets yet. <button class="text-indigo-400 underline" onclick="switchTab('buckets')">Add one</button></p>
+        </div>
+
+        <div class="bg-slate-800 rounded-xl p-5">
+          <h2 class="text-sm font-medium text-slate-400 mb-4">Recent Entries</h2>
+          <div id="recentEntries" class="space-y-2"></div>
+          <p id="recentEmpty" class="text-slate-500 text-sm hidden">No entries yet. Click "Add Balance Entry" to get started.</p>
+        </div>
+      </section>
+
+      <section id="tab-accounts" class="hidden">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-lg font-semibold">Assets</h2>
+          <button id="addAssetBtn" onclick="openAccountModal()" class="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm transition-colors">+ Add Asset</button>
+        </div>
+        <div id="accountsList" class="space-y-2"></div>
+        <p id="accountsEmpty" class="text-slate-500 text-sm hidden">No assets yet. Add one to get started.</p>
+      </section>
+
+      <section id="tab-buckets" class="hidden">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-lg font-semibold">Buckets</h2>
+          <div class="flex items-center gap-2">
+            <button id="autoAllocateBtn" data-auto-allocate-btn onclick="autoAllocateBuckets()" class="bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded-lg text-sm font-medium transition-colors">Allocate</button>
+            <button id="addBucketBtn" onclick="openBucketModal()" class="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm transition-colors">+ Add Bucket</button>
+          </div>
+        </div>
+        <div id="bucketsList" class="space-y-2"></div>
+        <p id="bucketsEmpty" class="text-slate-500 text-sm hidden">No buckets yet. Buckets let you allocate your money to goals like Emergency Fund or Vacation.</p>
+      </section>
+
+      <section id="tab-timeline" class="hidden">
+        <div class="bg-slate-800 rounded-xl p-5 mb-4">
+          <div class="flex flex-wrap gap-3 items-center">
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">Interval</label>
+              <select id="tlInterval" onchange="loadTimeline()" class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm">
+                <option value="day">Day</option>
+                <option value="week">Week</option>
+                <option value="month" selected>Month</option>
+              </select>
+            </div>
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">From</label>
+              <input type="date" id="tlFrom" onchange="loadTimeline()" class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">To</label>
+              <input type="date" id="tlTo" onchange="loadTimeline()" class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm" />
+            </div>
+            <div class="mt-5">
+              <button onclick="clearTimelineFilters()" class="text-slate-400 hover:text-white text-sm underline">Clear</button>
+            </div>
+          </div>
+        </div>
+        <div class="bg-slate-800 rounded-xl p-5 mb-4">
+          <h2 class="text-sm font-medium text-slate-400 mb-4">Net Worth Over Time</h2>
+          <div class="relative" style="height:320px">
+            <canvas id="timelineChart"></canvas>
+          </div>
+        </div>
+        <div id="tlEmpty" class="text-slate-500 text-sm text-center py-8 hidden">No data yet. Add some balance entries to see your timeline.</div>
+      </section>
+
+      <section id="tab-transactions" class="hidden">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-lg font-semibold">Transactions</h2>
+          <button id="addTransactionBtn" onclick="openTransactionModal()" class="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm transition-colors">+ New Transaction</button>
+        </div>
+        <div id="transactionsList" class="space-y-2"></div>
+        <p id="transactionsEmpty" class="text-slate-500 text-sm hidden">No transactions yet. Click "New Transaction" to record a credit, debit, or transfer.</p>
+      </section>
+    </main>
+
+    <div id="accountModal" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 hidden">
+      <div class="bg-slate-800 rounded-2xl p-6 w-full max-w-md mx-4 shadow-xl">
+        <h3 id="accountModalTitle" class="text-lg font-semibold mb-5">Add Asset</h3>
+        <div class="space-y-4">
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Asset Name *</label>
+            <input id="accName" type="text" placeholder="e.g. Emirates NBD Savings" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+          </div>
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Type *</label>
+            <select id="accType" onchange="onAccTypeChange()" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm">
+              <option value="bank">Bank Account</option>
+              <option value="loan">Loan Account</option>
+              <option value="shares">Shares</option>
+              <option value="investment_group">Investment Group</option>
+            </select>
+          </div>
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Institution</label>
+            <input id="accInstitution" type="text" placeholder="e.g. Chase, Vanguard" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+          </div>
+
+          <div id="shareFields" class="hidden space-y-3 border-t border-slate-700 pt-4">
+            <p class="text-xs font-semibold text-indigo-400 uppercase tracking-wide">Stock Details</p>
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">Stock / Company Name</label>
+              <input id="shareStockName" type="text" placeholder="e.g. Reliance Industries" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="text-xs text-slate-400 block mb-1">Stock Exchange</label>
+                <select id="shareExchange" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm">
+                  <optgroup label="── UAE ──">
+                    <option value="DFM">Dubai Financial Market (DFM)</option>
+                    <option value="ADX">Abu Dhabi Securities Exchange (ADX)</option>
+                    <option value="NASDAQ Dubai">NASDAQ Dubai</option>
+                  </optgroup>
+                  <optgroup label="── India ──">
+                    <option value="NSE">National Stock Exchange (NSE)</option>
+                    <option value="BSE">Bombay Stock Exchange (BSE)</option>
+                  </optgroup>
+                </select>
+              </div>
+              <div>
+                <label class="text-xs text-slate-400 block mb-1">Stock Code / Ticker</label>
+                <input id="shareStockCode" type="text" placeholder="e.g. EMAAR" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 uppercase" />
+              </div>
+            </div>
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">Quantity (number of shares)</label>
+              <input id="shareQty" type="number" step="0.001" min="0" placeholder="e.g. 100" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+            </div>
+            <p class="text-xs text-slate-500">Price is auto-fetched from the configured exchange source on save. Use ↻ Refresh on the asset card to update anytime.</p>
+          </div>
+
+          <div id="loanFields" class="hidden space-y-3 border-t border-slate-700 pt-4">
+            <p class="text-xs font-semibold text-orange-400 uppercase tracking-wide">Loan Details</p>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="text-xs text-slate-400 block mb-1">Interest Rate (% p.a.)</label>
+                <input id="loanRate" type="number" step="0.01" min="0" placeholder="e.g. 8.5" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-400 block mb-1">Remaining Tenure (months)</label>
+                <input id="loanTenure" type="number" step="1" min="0" placeholder="e.g. 240" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label id="loanEMILabel" class="text-xs text-slate-400 block mb-1">Monthly EMI (AED)</label>
+                <div class="relative">
+                  <span id="loanEMIPrefix" class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs pointer-events-none font-medium">AED</span>
+                  <input id="loanEMI" type="number" step="0.01" min="0" placeholder="0.00" class="w-full bg-slate-700 border border-slate-600 rounded-lg pl-12 pr-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+                </div>
+              </div>
+              <div>
+                <label id="loanPrincipalLabel" class="text-xs text-slate-400 block mb-1">Remaining Principal (AED)</label>
+                <div class="relative">
+                  <span id="loanPrincipalPrefix" class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs pointer-events-none font-medium">AED</span>
+                  <input id="loanPrincipal" type="number" step="0.01" min="0" placeholder="0.00" class="w-full bg-slate-700 border border-slate-600 rounded-lg pl-12 pr-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="flex gap-3 mt-6">
+          <button onclick="closeModal('accountModal')" class="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded-lg text-sm transition-colors">Cancel</button>
+          <button onclick="saveAccount()" class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-2 rounded-lg text-sm font-medium transition-colors">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="bucketModal" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 hidden">
+      <div class="bg-slate-800 rounded-2xl p-6 w-full max-w-md mx-4 shadow-xl">
+        <h3 id="bucketModalTitle" class="text-lg font-semibold mb-5">Add Bucket</h3>
+        <div class="space-y-4">
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Bucket Name *</label>
+            <input id="bktName" type="text" placeholder="e.g. Emergency Fund" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+          </div>
+          <div>
+            <label id="bktTargetLabel" class="text-xs text-slate-400 block mb-1">Target Amount (AED, optional)</label>
+            <div class="relative">
+              <span id="bktTargetPrefix" class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs pointer-events-none font-medium">AED</span>
+              <input id="bktTarget" type="number" placeholder="e.g. 10000" class="w-full bg-slate-700 border border-slate-600 rounded-lg pl-12 pr-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+            </div>
+          </div>
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Allocate Type</label>
+            <select id="bktAllocationType" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500">
+              <option value="manual">Manual Allocate</option>
+              <option value="auto">Auto Allocate</option>
+            </select>
+            <p class="text-xs text-slate-500 mt-1">Auto buckets are filled from bank-account cash when you click Allocate.</p>
+          </div>
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Color</label>
+            <input id="bktColor" type="color" value="#6366f1" class="w-full bg-slate-700 border border-slate-600 rounded-lg text-sm" />
+          </div>
+        </div>
+        <div class="flex gap-3 mt-6">
+          <button onclick="closeModal('bucketModal')" class="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded-lg text-sm transition-colors">Cancel</button>
+          <button onclick="saveBucket()" class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-2 rounded-lg text-sm font-medium transition-colors">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="entryModal" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 hidden">
+      <div class="bg-slate-800 rounded-2xl p-6 w-full max-w-lg mx-4 shadow-xl max-h-[90vh] overflow-y-auto">
+        <h3 class="text-lg font-semibold mb-5">Add Balance Entry</h3>
+        <div class="space-y-4">
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Asset *</label>
+            <select id="entAccount" onchange="onEntryAccountChange()" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm"></select>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label id="entAmountLabel" class="text-xs text-slate-400 block mb-1">Balance Amount (AED) *</label>
+              <div class="relative">
+                <span id="entAmountPrefix" class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs pointer-events-none font-medium">AED</span>
+                <input id="entAmount" type="number" step="0.01" placeholder="0.00" oninput="updateAllocRemaining()" class="w-full bg-slate-700 border border-slate-600 rounded-lg pl-12 pr-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+              </div>
+            </div>
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">Date</label>
+              <input id="entDate" type="datetime-local" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+            </div>
+          </div>
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Note (optional)</label>
+            <input id="entNote" type="text" placeholder="e.g. end of month snapshot" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+          </div>
+          <div id="allocSection">
+            <div class="flex items-center justify-between mb-2">
+              <label class="text-xs text-slate-400">Manual Bucket Allocations (optional)</label>
+              <span id="allocRemaining" class="text-xs text-slate-400"></span>
+            </div>
+            <div id="allocRows" class="space-y-2"></div>
+          </div>
+        </div>
+        <div class="flex gap-3 mt-6">
+          <button onclick="closeModal('entryModal')" class="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded-lg text-sm transition-colors">Cancel</button>
+          <button onclick="saveEntry()" class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-2 rounded-lg text-sm font-medium transition-colors">Save Entry</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="manualAllocateModal" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 hidden">
+      <div class="bg-slate-800 rounded-2xl p-6 w-full max-w-md mx-4 shadow-xl">
+        <h3 id="manualAllocateModalTitle" class="text-lg font-semibold mb-2">Allocate Bucket</h3>
+        <p id="manualAllocCurrentHint" class="text-sm text-slate-400 mb-5"></p>
+        <div class="space-y-4">
+          <div>
+            <label id="manualAllocAvailableLabel" class="text-xs text-slate-400 block mb-1">Unallocated Fund (AED)</label>
+            <div class="relative">
+              <span id="manualAllocAvailablePrefix" class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs pointer-events-none font-medium">AED</span>
+              <input id="manualAllocAvailable" type="text" readonly class="w-full bg-slate-900/60 border border-slate-700 rounded-lg pl-12 pr-3 py-2 text-sm text-slate-200" />
+            </div>
+          </div>
+          <div>
+            <label id="manualAllocAmountLabel" class="text-xs text-slate-400 block mb-1">Allocate Amount (AED)</label>
+            <div class="relative">
+              <span id="manualAllocAmountPrefix" class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs pointer-events-none font-medium">AED</span>
+              <input id="manualAllocAmount" type="number" min="0" step="0.01" placeholder="0.00" oninput="updateManualAllocateValidation()" class="w-full bg-slate-700 border border-slate-600 rounded-lg pl-12 pr-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+            </div>
+            <p class="text-xs text-slate-500 mt-1">This adds to the bucket's current manual allocation.</p>
+          </div>
+          <p id="manualAllocError" class="text-xs text-rose-400 min-h-[1rem]"></p>
+        </div>
+        <div class="flex gap-3 mt-6">
+          <button onclick="closeModal('manualAllocateModal')" class="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded-lg text-sm transition-colors">Cancel</button>
+          <button id="manualAllocSaveBtn" onclick="saveManualBucketAllocation()" class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-2 rounded-lg text-sm font-medium transition-colors">Allocate</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="historyModal" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 hidden">
+      <div class="bg-slate-800 rounded-2xl p-6 w-full max-w-lg mx-4 shadow-xl max-h-[80vh] overflow-y-auto">
+        <div class="flex items-center justify-between mb-5">
+          <h3 id="historyModalTitle" class="text-lg font-semibold">Balance History</h3>
+          <button onclick="closeModal('historyModal')" class="text-slate-400 hover:text-white text-xl leading-none">&times;</button>
+        </div>
+        <div id="historyList" class="space-y-2"></div>
+      </div>
+    </div>
+
+    <div id="transactionModal" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 hidden">
+      <div class="bg-slate-800 rounded-2xl p-6 w-full max-w-md mx-4 shadow-xl">
+        <h3 class="text-lg font-semibold mb-5">New Transaction</h3>
+        <div class="space-y-4">
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Type *</label>
+            <div class="flex gap-2">
+              <button id="txnTypeCredit" onclick="setTxnType('credit')" class="txn-type-btn flex-1 py-2 rounded-lg text-sm font-medium border border-slate-600 bg-slate-700 text-slate-300 transition-colors">Credit</button>
+              <button id="txnTypeDebit" onclick="setTxnType('debit')" class="txn-type-btn flex-1 py-2 rounded-lg text-sm font-medium border border-slate-600 bg-slate-700 text-slate-300 transition-colors">Debit</button>
+              <button id="txnTypeIntra" onclick="setTxnType('intra')" class="txn-type-btn flex-1 py-2 rounded-lg text-sm font-medium border border-slate-600 bg-slate-700 text-slate-300 transition-colors">Transfer</button>
+            </div>
+          </div>
+
+          <div id="txnFromRow">
+            <label class="text-xs text-slate-400 block mb-1" id="txnFromLabel">From Account *</label>
+            <select id="txnFrom" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500">
+              <option value="">— select account —</option>
+            </select>
+          </div>
+
+          <div id="txnToRow">
+            <label class="text-xs text-slate-400 block mb-1" id="txnToLabel">To Account *</label>
+            <select id="txnTo" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500">
+              <option value="">— select account —</option>
+            </select>
+          </div>
+
+          <div id="txnCounterpartyRow">
+            <label class="text-xs text-slate-400 block mb-1" id="txnCounterpartyLabel">Counterparty / Description *</label>
+            <input id="txnCounterparty" type="text" placeholder="e.g. Salary from ACME Corp" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+          </div>
+
+          <div>
+            <label id="txnAmountLabel" class="text-xs text-slate-400 block mb-1">Amount (AED) *</label>
+            <div class="relative">
+              <span id="txnAmountPrefix" class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs pointer-events-none font-medium">AED</span>
+              <input id="txnAmount" type="number" step="0.01" min="0.01" placeholder="0.00" class="w-full bg-slate-700 border border-slate-600 rounded-lg pl-12 pr-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+            </div>
+          </div>
+
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Date</label>
+            <input id="txnDate" type="datetime-local" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+          </div>
+
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Note (optional)</label>
+            <input id="txnNote" type="text" placeholder="e.g. July rent payment" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+          </div>
+
+          <p id="txnError" class="text-xs text-rose-400 min-h-[1rem]"></p>
+        </div>
+        <div class="flex gap-3 mt-6">
+          <button onclick="closeModal('transactionModal')" class="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded-lg text-sm transition-colors">Cancel</button>
+          <button onclick="saveTransaction()" class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-2 rounded-lg text-sm font-medium transition-colors">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
