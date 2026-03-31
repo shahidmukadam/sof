@@ -24,21 +24,21 @@ All persisted money values are stored in `USD`. The frontend converts values int
 
 ## File Layout
 
-- [app.py](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/app.py): Flask app, database setup, migrations, API routes, stock/rate fetchers
-- [schema.sql](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/schema.sql): base SQLite schema
-- [schema_postgres.sql](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/schema_postgres.sql): PostgreSQL schema for hosted deployments
-- [templates/index.html](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/templates/index.html): single-page shell and modal markup
-- [static/app.js](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/static/app.js): client-side state, rendering, modal flows, API calls, charts
-- [requirements.txt](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/requirements.txt): Python dependency list
-- [secret.key](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/secret.key): locally generated Flask session secret, created on first startup and gitignored
-- [render.yaml](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/render.yaml): optional Render Blueprint for a web service plus Render Postgres
+- [app.py](app.py): Flask app, database setup, migrations, API routes, stock/rate fetchers
+- [schema.sql](schema.sql): base SQLite schema
+- [schema_postgres.sql](schema_postgres.sql): PostgreSQL schema for hosted deployments
+- [templates/index.html](templates/index.html): single-page shell and modal markup
+- [static/app.js](static/app.js): client-side state, rendering, modal flows, API calls, charts
+- [requirements.txt](requirements.txt): Python dependency list
+- `secret.key`: locally generated Flask session secret, created on first startup and gitignored
+- [render.yaml](render.yaml): optional Render Blueprint for a web service plus Render Postgres
 
 ## How The App Works
 
 The app is effectively a single-page dashboard:
 
-1. `GET /` serves [templates/index.html](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/templates/index.html).
-2. On startup, [static/app.js](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/static/app.js) checks `/api/auth/session`.
+1. `GET /` serves [templates/index.html](templates/index.html).
+2. On startup, [static/app.js](static/app.js) checks `/api/auth/session`.
 3. Logged-out users stay in the auth shell and use sign-in, sign-up, activate-existing, or forgot-password flows.
 4. Logged-in users move into the finance app, which then loads rates, accounts, buckets, and summary data for the selected read scope.
 5. UI actions call JSON API endpoints under `/api/...`.
@@ -146,7 +146,7 @@ Rates come from `/api/rates`, backed by `https://open.er-api.com/v6/latest/USD`,
 
 ## Database Model
 
-Defined in [schema.sql](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/schema.sql) for SQLite and [schema_postgres.sql](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/schema_postgres.sql) for PostgreSQL.
+Defined in [schema.sql](schema.sql) for SQLite and [schema_postgres.sql](schema_postgres.sql) for PostgreSQL.
 
 ### `users`
 
@@ -293,11 +293,11 @@ Key columns:
 
 ### Database lifecycle
 
-In [app.py](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/app.py):
+In [app.py](app.py):
 
 - `get_db()` creates one database connection per request and selects SQLite or PostgreSQL from environment configuration
 - `close_db()` closes that connection on teardown
-- `init_db()` runs [schema.sql](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/schema.sql) or [schema_postgres.sql](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/schema_postgres.sql) based on the active backend
+- `init_db()` runs [schema.sql](schema.sql) or [schema_postgres.sql](schema_postgres.sql) based on the active backend
 - `migrate_db()` applies idempotent schema evolution for older SQLite databases
 - `_load_secret_key()` creates `secret.key` on first startup with a 32-byte hex secret and reuses it on later starts
 
@@ -312,14 +312,14 @@ In [app.py](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects
 - creating the `users` table if missing
 - creating `families`, `auth_accounts`, `otp_challenges`, and `local_otp_outbox`
 - attaching legacy users to household families when `family_id` is missing
-- preserving the shared `Shahid & Fatima` family when those profiles already exist in an older local database
+- preserving a legacy shared household when an older local database contains two unassigned users
 - backfilling legacy accounts and buckets onto a generic `Primary` owner only when an older pre-user database needs it
 - adding `buckets.allocation_type` with a default of `manual`
 - rebuilding buckets so bucket names are unique per user
 
 ### Authentication and OTP
 
-Auth helpers live in [app.py](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/app.py) and enforce all protected ownership checks from session state.
+Auth helpers live in [app.py](app.py) and enforce all protected ownership checks from session state.
 
 - `_current_auth_account()` resolves the signed-in auth row plus finance user and family
 - `current_finance_user_id()` is the only source of truth for protected writes
@@ -357,7 +357,7 @@ If price fetching fails on create or update, the asset is still saved and the fr
 
 ## Frontend Architecture
 
-[static/app.js](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/static/app.js) manages everything client-side.
+[static/app.js](static/app.js) manages everything client-side.
 
 ### Global state
 
@@ -611,7 +611,7 @@ Manual setup for Render free tier:
    - `SOF_SECRET_KEY`: a generated random secret
 7. Deploy the web service.
 
-The optional [render.yaml](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/render.yaml) describes the same architecture for teams that use Render Blueprints.
+The optional [render.yaml](render.yaml) describes the same architecture for teams that use Render Blueprints.
 
 - installing dependencies with `pip install -r requirements.txt`
 - starting the app with `gunicorn --workers 1 --threads 4 wsgi:application`

@@ -404,7 +404,7 @@ def migrate_db():
             )
         """)
 
-        # Migration 3: add accounts.user_id and assign legacy data to Shahid.
+        # Migration 3: add accounts.user_id and assign legacy data to a primary owner.
         account_cols = {
             row[1] for row in conn.execute("PRAGMA table_info(accounts)").fetchall()
         }
@@ -491,37 +491,29 @@ def migrate_db():
                     (legacy_owner_id,)
                 )
 
-        shahid = conn.execute(
-            "SELECT id, family_id FROM users WHERE name='Shahid'"
-        ).fetchone()
-        fatima = conn.execute(
-            "SELECT id, family_id FROM users WHERE name='Fatima'"
-        ).fetchone()
-        if shahid and fatima and (shahid['family_id'] is None or fatima['family_id'] is None):
-            legacy_family = conn.execute(
-                "SELECT id FROM families WHERE name=?",
-                ('Shahid & Fatima',)
-            ).fetchone()
-            if not legacy_family:
-                cur = conn.execute(
-                    "INSERT INTO families (name, created_at) VALUES (?, ?)",
-                    ('Shahid & Fatima', _dt_str(_utc_now()))
-                )
-                legacy_family_id = cur.lastrowid
-            else:
-                legacy_family_id = legacy_family['id']
-            conn.execute(
-                "UPDATE users SET family_id=? WHERE id=? AND family_id IS NULL",
-                (legacy_family_id, shahid['id'])
-            )
-            conn.execute(
-                "UPDATE users SET family_id=? WHERE id=? AND family_id IS NULL",
-                (legacy_family_id, fatima['id'])
-            )
-
         orphan_users = conn.execute(
             "SELECT id, name FROM users WHERE family_id IS NULL ORDER BY id"
         ).fetchall()
+        total_users = conn.execute(
+            "SELECT COUNT(*) AS c FROM users"
+        ).fetchone()['c']
+
+        # Preserve the old shared-household shape for legacy two-user databases.
+        if len(orphan_users) == 2 and total_users == 2:
+            cur = conn.execute(
+                "INSERT INTO families (name, created_at) VALUES (?, ?)",
+                ('Legacy Shared Household', _dt_str(_utc_now()))
+            )
+            legacy_family_id = cur.lastrowid
+            for row in orphan_users:
+                conn.execute(
+                    "UPDATE users SET family_id=? WHERE id=? AND family_id IS NULL",
+                    (legacy_family_id, row['id'])
+                )
+            orphan_users = conn.execute(
+                "SELECT id, name FROM users WHERE family_id IS NULL ORDER BY id"
+            ).fetchall()
+
         for row in orphan_users:
             cur = conn.execute(
                 "INSERT INTO families (name, created_at) VALUES (?, ?)",
