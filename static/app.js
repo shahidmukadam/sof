@@ -78,7 +78,7 @@ function typeLabel(t) {
     loan: 'Loan Account',
     shares: 'Shares',
     investment_group: 'Investment Group',
-  }[t] || t;
+  }[t] || 'Other';
 }
 
 function dateStr(iso) {
@@ -87,6 +87,35 @@ function dateStr(iso) {
   const date = new Date(text);
   if (Number.isNaN(date.getTime())) return iso;
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function dateHtml(iso) {
+  return escapeHtml(dateStr(iso));
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function safeColor(value, fallback = '#6366f1') {
+  const text = String(value ?? '').trim();
+  return /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(text) ? text : fallback;
+}
+
+function setSelectOptions(select, options) {
+  if (!select) return;
+  select.replaceChildren(...options.map(({ value, label, selected = false }) => {
+    const option = document.createElement('option');
+    option.value = String(value ?? '');
+    option.textContent = String(label ?? '');
+    option.selected = !!selected;
+    return option;
+  }));
 }
 
 function nowLocal() {
@@ -437,13 +466,13 @@ async function loadActivationProfiles() {
   const rows = await api('/api/auth/available-profiles');
   const select = document.getElementById('activateProfileSelect');
   if (!rows.length) {
-    select.innerHTML = '<option value="">No profiles available</option>';
+    setSelectOptions(select, [{ value: '', label: 'No profiles available' }]);
     return;
   }
-  select.innerHTML = [
-    '<option value="">Select profile</option>',
-    ...rows.map(row => `<option value="${row.id}">${row.name}</option>`),
-  ].join('');
+  setSelectOptions(select, [
+    { value: '', label: 'Select profile' },
+    ...rows.map(row => ({ value: row.id, label: row.name || '' })),
+  ]);
 }
 
 async function signIn() {
@@ -629,7 +658,7 @@ async function loadDashboard() {
   const breakdown = document.getElementById('byTypeBreakdown');
   breakdown.innerHTML = Object.entries(nw.by_type).map(([type, amt]) => `
     <div class="bg-slate-700/50 rounded-lg p-3">
-      <p class="text-xs text-slate-400">${typeLabel(type)}</p>
+      <p class="text-xs text-slate-400">${escapeHtml(typeLabel(type))}</p>
       <p class="text-lg font-semibold ${typeTextColors[type] || 'text-slate-300'}">${money(amt)}</p>
     </div>
   `).join('');
@@ -650,12 +679,14 @@ async function loadDashboard() {
     bucketDiv.innerHTML = buckets.map(b => {
       const pct = b.target ? Math.min(100, (b.allocated / b.target) * 100) : null;
       const status = pct === null ? 'text-slate-400' : pct >= 100 ? 'text-emerald-400' : pct >= 50 ? 'text-amber-400' : 'text-rose-400';
+      const bucketColor = safeColor(b.color);
+      const bucketName = escapeHtml(b.name);
       return `
         <div>
           <div class="flex items-center justify-between mb-1">
             <span class="text-sm flex items-center gap-2">
-              <span class="inline-block w-2.5 h-2.5 rounded-full" style="background:${b.color}"></span>
-              ${b.name}
+              <span class="inline-block w-2.5 h-2.5 rounded-full" style="background:${bucketColor}"></span>
+              ${bucketName}
               <span class="text-[11px] px-2 py-0.5 rounded-full ${bucketTypeClass(bucketAllocationType(b))}">${bucketTypeLabel(bucketAllocationType(b))}</span>
             </span>
             <span class="text-sm ${status}">
@@ -664,7 +695,7 @@ async function loadDashboard() {
           </div>
           ${b.target ? `
           <div class="h-1.5 bg-slate-700 rounded-full overflow-hidden">
-            <div class="h-full rounded-full progress-bar" style="width:${pct}%;background:${b.color}"></div>
+            <div class="h-full rounded-full progress-bar" style="width:${pct}%;background:${bucketColor}"></div>
           </div>` : ''}
         </div>
       `;
@@ -679,18 +710,24 @@ async function loadDashboard() {
     recentEmpty.classList.remove('hidden');
   } else {
     recentEmpty.classList.add('hidden');
-    recentDiv.innerHTML = top.map(e => `
-      <div class="flex items-center justify-between py-2 border-b border-slate-700 last:border-0">
-        <div>
-          <span class="text-sm font-medium">${isAllUsersView() && e.user_name ? `${e.user_name} · ${e.account_name}` : e.account_name}</span>
-          ${e.note ? `<span class="text-xs text-slate-400 ml-2">${e.note}</span>` : ''}
+    recentDiv.innerHTML = top.map(e => {
+      const accountName = escapeHtml(e.account_name || '');
+      const userName = escapeHtml(e.user_name || '');
+      const entryTitle = isAllUsersView() && e.user_name ? `${userName} · ${accountName}` : accountName;
+      const noteHtml = e.note ? `<span class="text-xs text-slate-400 ml-2">${escapeHtml(e.note)}</span>` : '';
+      return `
+        <div class="flex items-center justify-between py-2 border-b border-slate-700 last:border-0">
+          <div>
+            <span class="text-sm font-medium">${entryTitle}</span>
+            ${noteHtml}
+          </div>
+          <div class="text-right">
+            <span class="text-sm font-semibold">${money(e.amount)}</span>
+            <span class="text-xs text-slate-400 ml-2">${dateHtml(e.recorded_at)}</span>
+          </div>
         </div>
-        <div class="text-right">
-          <span class="text-sm font-semibold">${money(e.amount)}</span>
-          <span class="text-xs text-slate-400 ml-2">${dateStr(e.recorded_at)}</span>
-        </div>
-      </div>
-    `).join('');
+      `;
+    }).join('');
   }
 
   document.getElementById('lastUpdated').textContent = recent.length
@@ -742,6 +779,7 @@ function renderAccounts() {
     investment_group: 'bg-blue-500/20 text-blue-400',
   };
   list.innerHTML = state.accounts.map(a => {
+    const accountId = Number(a.id);
     const isLoan = a.type === 'loan';
     const isShares = a.type === 'shares';
     const metaLine = readOnly
@@ -750,6 +788,13 @@ function renderAccounts() {
           a.user_name ? `Merged across ${a.user_name}` : '',
         ].filter(Boolean).join(' · ')
       : (a.institution || (isShares && a.stock_name ? a.stock_name : ''));
+    const accountName = escapeHtml(a.name);
+    const metaLineHtml = escapeHtml(metaLine);
+    const exchangeHtml = escapeHtml(a.exchange || '—');
+    const stockCodeHtml = escapeHtml(a.stock_code || '—');
+    const priceHtml = a.last_price != null
+      ? `${escapeHtml(a.last_price_currency || '')} ${Number(a.last_price).toLocaleString(undefined, { maximumFractionDigits: 4 })}`
+      : 'Not fetched yet';
 
     const loanMeta = isLoan ? `
       <div class="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-400">
@@ -761,13 +806,11 @@ function renderAccounts() {
 
     const sharesMeta = isShares ? `
       <div class="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-400">
-        <span>Exchange: <span class="text-indigo-300">${a.exchange || '—'}</span></span>
-        <span>Ticker: <span class="text-indigo-300">${a.stock_code || '—'}</span></span>
+        <span>Exchange: <span class="text-indigo-300">${exchangeHtml}</span></span>
+        <span>Ticker: <span class="text-indigo-300">${stockCodeHtml}</span></span>
         <span>Qty: <span class="text-indigo-300">${a.quantity != null ? Number(a.quantity).toLocaleString() : '—'} shares</span></span>
-        <span>Price: <span class="text-indigo-300">${a.last_price != null
-          ? `${a.last_price_currency} ${Number(a.last_price).toLocaleString(undefined, { maximumFractionDigits: 4 })}`
-          : 'Not fetched yet'}</span></span>
-        ${a.last_fetched ? `<span class="col-span-2 text-slate-500">Updated: ${dateStr(a.last_fetched)}</span>` : ''}
+        <span>Price: <span class="text-indigo-300">${priceHtml}</span></span>
+        ${a.last_fetched ? `<span class="col-span-2 text-slate-500">Updated: ${dateHtml(a.last_fetched)}</span>` : ''}
       </div>` : '';
 
     const cardBorder = isLoan ? 'border border-orange-500/20' : isShares ? 'border border-indigo-500/20' : '';
@@ -776,19 +819,19 @@ function renderAccounts() {
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-3">
             <div>
-              <p class="font-medium">${a.name}</p>
-              <p class="text-xs text-slate-400">${metaLine}</p>
+              <p class="font-medium">${accountName}</p>
+              <p class="text-xs text-slate-400">${metaLineHtml}</p>
             </div>
-            <span class="text-xs px-2 py-0.5 rounded-full ${typeColors[a.type] || 'bg-slate-500/20 text-slate-400'}">${typeLabel(a.type)}</span>
+            <span class="text-xs px-2 py-0.5 rounded-full ${typeColors[a.type] || 'bg-slate-500/20 text-slate-400'}">${escapeHtml(typeLabel(a.type))}</span>
           </div>
           ${readOnly ? `
           <div class="text-xs text-slate-500 px-3 py-1.5 rounded-lg bg-slate-900/40 border border-slate-700/70">View only</div>` : `
           <div class="flex items-center gap-2">
-            <button onclick="viewHistory(${a.id}, '${a.name.replace(/'/g, "\\'")}')" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">History</button>
-            ${isShares ? `<button data-refresh="${a.id}" onclick="refreshPrice(${a.id})" class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">↻ Price</button>` : ''}
-            ${(!isLoan && !isShares) ? `<button onclick="openAddEntry(${a.id})" class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">+ Entry</button>` : ''}
-            <button onclick="openAccountModal(${a.id})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Edit</button>
-            <button onclick="deleteAccount(${a.id})" class="text-xs text-rose-400 hover:text-rose-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Delete</button>
+            <button onclick="viewHistory(${accountId})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">History</button>
+            ${isShares ? `<button data-refresh="${accountId}" onclick="refreshPrice(${accountId})" class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">↻ Price</button>` : ''}
+            ${(!isLoan && !isShares) ? `<button onclick="openAddEntry(${accountId})" class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">+ Entry</button>` : ''}
+            <button onclick="openAccountModal(${accountId})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Edit</button>
+            <button onclick="deleteAccount(${accountId})" class="text-xs text-rose-400 hover:text-rose-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Delete</button>
           </div>`}
         </div>
         ${loanMeta}${sharesMeta}
@@ -914,26 +957,30 @@ async function deleteAccount(id) {
   await loadDashboard();
 }
 
-async function viewHistory(accountId, name) {
+async function viewHistory(accountId) {
   if (!requireSingleUserSelection('Switch to My Profile to view account history.')) return;
   const entries = await api(withScopeQuery('/api/balances', { account_id: accountId }));
-  document.getElementById('historyModalTitle').textContent = `${name} — History`;
+  const account = state.accounts.find(item => Number(item.id) === Number(accountId));
+  document.getElementById('historyModalTitle').textContent = `${account?.name || 'Account'} — History`;
   const list = document.getElementById('historyList');
   if (!entries.length) {
     list.innerHTML = '<p class="text-slate-500 text-sm">No entries yet.</p>';
   } else {
-    list.innerHTML = entries.map(e => `
-      <div class="flex items-center justify-between py-3 border-b border-slate-700 last:border-0">
-        <div>
-          <p class="text-sm font-semibold">${money(e.amount)}</p>
-          ${e.note ? `<p class="text-xs text-slate-400">${e.note}</p>` : ''}
+    list.innerHTML = entries.map(e => {
+      const noteHtml = e.note ? `<p class="text-xs text-slate-400">${escapeHtml(e.note)}</p>` : '';
+      return `
+        <div class="flex items-center justify-between py-3 border-b border-slate-700 last:border-0">
+          <div>
+            <p class="text-sm font-semibold">${money(e.amount)}</p>
+            ${noteHtml}
+          </div>
+          <div class="flex items-center gap-3">
+            <span class="text-xs text-slate-400">${dateHtml(e.recorded_at)}</span>
+            <button onclick="deleteEntry(${Number(e.id)})" class="text-rose-400 hover:text-rose-300 text-xs">Delete</button>
+          </div>
         </div>
-        <div class="flex items-center gap-3">
-          <span class="text-xs text-slate-400">${dateStr(e.recorded_at)}</span>
-          <button onclick="deleteEntry(${e.id})" class="text-rose-400 hover:text-rose-300 text-xs">Delete</button>
-        </div>
-      </div>
-    `).join('');
+      `;
+    }).join('');
   }
   openModal('historyModal');
 }
@@ -963,38 +1010,41 @@ function renderBuckets() {
   }
   empty.classList.add('hidden');
   list.innerHTML = state.buckets.map(b => {
+    const bucketId = Number(b.id);
     const summary = getBucketSummaryForView(b);
     const allocated = summary?.allocated ?? 0;
     const target = summary?.target ?? b.target ?? 0;
     const pct = target ? Math.min(100, (allocated / target) * 100) : null;
     const mergedLabel = readOnly && b._merged_count ? `Merged across ${formatUserBadgeLabel(b._merged_count)}` : '';
+    const bucketColor = safeColor(b.color);
+    const bucketName = escapeHtml(b.name);
     return `
       <div class="bg-slate-800 rounded-xl px-5 py-4">
         <div class="flex items-center justify-between gap-4">
           <div class="flex items-center gap-3">
-            <span class="inline-block w-3 h-3 rounded-full" style="background:${b.color}"></span>
+            <span class="inline-block w-3 h-3 rounded-full" style="background:${bucketColor}"></span>
             <div>
               <p class="font-medium flex items-center gap-2">
-                <span>${b.name}</span>
+                <span>${bucketName}</span>
                 <span class="text-[11px] px-2 py-0.5 rounded-full ${bucketTypeClass(bucketAllocationType(b))}">${bucketTypeLabel(bucketAllocationType(b))}</span>
               </p>
               <p class="text-xs text-slate-400">
                 ${target ? `Allocated ${money(allocated)} of ${money(target)}` : `Allocated ${money(allocated)}`}
-                ${mergedLabel ? ` · ${mergedLabel}` : ''}
+                ${mergedLabel ? ` · ${escapeHtml(mergedLabel)}` : ''}
               </p>
             </div>
           </div>
           ${readOnly ? `
           <div class="text-xs text-slate-500 px-3 py-1.5 rounded-lg bg-slate-900/40 border border-slate-700/70">View only</div>` : `
           <div class="flex items-center gap-2">
-            <button onclick="openBucketAllocate(${b.id})" class="text-xs text-emerald-400 hover:text-emerald-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Allocate</button>
-            <button onclick="openBucketModal(${b.id})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Edit</button>
-            <button onclick="deleteBucket(${b.id})" class="text-xs text-rose-400 hover:text-rose-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Delete</button>
+            <button onclick="openBucketAllocate(${bucketId})" class="text-xs text-emerald-400 hover:text-emerald-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Allocate</button>
+            <button onclick="openBucketModal(${bucketId})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Edit</button>
+            <button onclick="deleteBucket(${bucketId})" class="text-xs text-rose-400 hover:text-rose-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Delete</button>
           </div>`}
         </div>
         ${pct !== null ? `
         <div class="mt-3 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-          <div class="h-full rounded-full progress-bar" style="width:${pct}%;background:${b.color}"></div>
+          <div class="h-full rounded-full progress-bar" style="width:${pct}%;background:${bucketColor}"></div>
         </div>` : ''}
       </div>
     `;
@@ -1196,7 +1246,11 @@ function openAddEntry(accountId = null) {
   if (!requireSingleUserSelection()) return;
   const sel = document.getElementById('entAccount');
   const manualAssets = state.accounts.filter(a => a.type !== 'loan' && a.type !== 'shares');
-  sel.innerHTML = manualAssets.map(a => `<option value="${a.id}" ${a.id == accountId ? 'selected' : ''}>${a.name} (${typeLabel(a.type)})</option>`).join('');
+  setSelectOptions(sel, manualAssets.map(a => ({
+    value: a.id,
+    label: `${a.name} (${typeLabel(a.type)})`,
+    selected: a.id == accountId,
+  })));
   if (!manualAssets.length) {
     alert('Add a Bank Account or Investment Group asset first.\n(Shares are tracked automatically via price refresh.)');
     switchTab('accounts');
@@ -1241,13 +1295,13 @@ function onEntryAccountChange() {
   const sym = modalCurrencySymbol(modalCur);
   allocRows.innerHTML = manualBuckets.map(b => `
     <div class="flex items-center gap-2">
-      <span class="inline-block w-2 h-2 rounded-full" style="background:${b.color}"></span>
-      <span class="text-sm flex-1">${b.name}</span>
+      <span class="inline-block w-2 h-2 rounded-full" style="background:${safeColor(b.color)}"></span>
+      <span class="text-sm flex-1">${escapeHtml(b.name)}</span>
       <div class="relative">
         <span class="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 text-xs pointer-events-none">${sym}</span>
         <input type="number" step="0.01" placeholder="0.00"
           id="alloc_${b.id}"
-          value="${existingValues[b.id] || ''}"
+          value="${escapeHtml(existingValues[b.id] || '')}"
           oninput="updateAllocRemaining()"
           class="w-32 bg-slate-700 border border-slate-600 rounded-lg pl-9 pr-2 py-1.5 text-sm focus:outline-none focus:border-indigo-500" />
       </div>
@@ -1450,7 +1504,7 @@ async function loadTransactions() {
 }
 
 function txnTypeLabel(t) {
-  return { credit: 'Credit', debit: 'Debit', intra: 'Transfer' }[t] || t;
+  return { credit: 'Credit', debit: 'Debit', intra: 'Transfer' }[t] || 'Other';
 }
 
 function txnTypeClass(t) {
@@ -1474,33 +1528,36 @@ function renderTransactions() {
   empty?.classList.add('hidden');
 
   list.innerHTML = state.transactions.map(txn => {
-    const fromName = txn.from_account_name || txn.counterparty || '—';
-    const toName = txn.to_account_name || txn.counterparty || '—';
+    const txnId = Number(txn.id);
+    const fromName = escapeHtml(txn.from_account_name || txn.counterparty || '—');
+    const toName = escapeHtml(txn.to_account_name || txn.counterparty || '—');
+    const counterparty = escapeHtml(txn.counterparty || 'External');
     let flowHtml = '';
     if (txn.txn_type === 'credit') {
-      flowHtml = `<span class="text-slate-400">${txn.counterparty || 'External'}</span> → <span class="text-white font-medium">${toName}</span>`;
+      flowHtml = `<span class="text-slate-400">${counterparty}</span> → <span class="text-white font-medium">${toName}</span>`;
     } else if (txn.txn_type === 'debit') {
-      flowHtml = `<span class="text-white font-medium">${fromName}</span> → <span class="text-slate-400">${txn.counterparty || 'External'}</span>`;
+      flowHtml = `<span class="text-white font-medium">${fromName}</span> → <span class="text-slate-400">${counterparty}</span>`;
     } else {
-      flowHtml = `<span class="text-white font-medium">${txn.from_account_name || '—'}</span> → <span class="text-white font-medium">${txn.to_account_name || '—'}</span>`;
+      flowHtml = `<span class="text-white font-medium">${fromName}</span> → <span class="text-white font-medium">${toName}</span>`;
     }
 
     const amtClass = txn.txn_type === 'debit' ? 'text-rose-300' : 'text-emerald-300';
     const amtPrefix = txn.txn_type === 'debit' ? '−' : '+';
     const deleteBtn = !isAllUsersView()
-      ? `<button onclick="deleteTransaction(${txn.id})" class="ml-3 text-slate-500 hover:text-rose-400 text-xs transition-colors">Delete</button>`
+      ? `<button onclick="deleteTransaction(${txnId})" class="ml-3 text-slate-500 hover:text-rose-400 text-xs transition-colors">Delete</button>`
       : '';
+    const noteHtml = txn.note ? `<p class="text-xs text-slate-400 truncate mt-0.5">${escapeHtml(txn.note)}</p>` : '';
 
     return `
       <div class="bg-slate-700/50 rounded-xl px-4 py-3 flex items-center gap-3">
-        <span class="text-xs px-2 py-0.5 rounded-full font-medium whitespace-nowrap ${txnTypeClass(txn.txn_type)}">${txnTypeLabel(txn.txn_type)}</span>
+        <span class="text-xs px-2 py-0.5 rounded-full font-medium whitespace-nowrap ${txnTypeClass(txn.txn_type)}">${escapeHtml(txnTypeLabel(txn.txn_type))}</span>
         <div class="flex-1 min-w-0">
           <div class="text-sm">${flowHtml}</div>
-          ${txn.note ? `<p class="text-xs text-slate-400 truncate mt-0.5">${txn.note}</p>` : ''}
+          ${noteHtml}
         </div>
         <div class="text-right shrink-0">
           <p class="text-sm font-semibold ${amtClass}">${amtPrefix}${money(txn.amount)}</p>
-          <p class="text-xs text-slate-500">${dateStr(txn.recorded_at)}</p>
+          <p class="text-xs text-slate-500">${dateHtml(txn.recorded_at)}</p>
         </div>
         ${deleteBtn}
       </div>
@@ -1549,15 +1606,14 @@ function setTxnType(type) {
 
 function populateTxnAccountSelects() {
   const myAccounts = state.accounts.filter(a => !isAllUsersView() || a);
-  const opts = myAccounts
+  const options = myAccounts
     .filter(a => typeof a.id === 'number') // skip merged entries from all-users view
-    .map(a => `<option value="${a.id}">${a.name} (${typeLabel(a.type)})</option>`)
-    .join('');
+    .map(a => ({ value: a.id, label: `${a.name} (${typeLabel(a.type)})` }));
 
   const fromSel = document.getElementById('txnFrom');
   const toSel = document.getElementById('txnTo');
-  if (fromSel) fromSel.innerHTML = `<option value="">— select account —</option>${opts}`;
-  if (toSel) toSel.innerHTML = `<option value="">— select account —</option>${opts}`;
+  if (fromSel) setSelectOptions(fromSel, [{ value: '', label: '— select account —' }, ...options]);
+  if (toSel) setSelectOptions(toSel, [{ value: '', label: '— select account —' }, ...options]);
 }
 
 function openTransactionModal() {
