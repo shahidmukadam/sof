@@ -1,6 +1,6 @@
 # State of Finance
 
-`State of Finance` is a small Flask + SQLite personal-finance dashboard for tracking net worth over time.
+`State of Finance` is a small Flask personal-finance dashboard for tracking net worth over time. It supports SQLite for local development and PostgreSQL for hosted deployments.
 
 It supports:
 
@@ -16,20 +16,22 @@ All persisted money values are stored in `USD`. The frontend converts values int
 
 ## Tech Stack
 
-- Backend: Flask, SQLite, `urllib.request`
+- Backend: Flask, SQLite/PostgreSQL, `urllib.request`
 - Frontend: server-rendered HTML, Tailwind via CDN, plain JavaScript
 - Charts: Chart.js via CDN
-- Database: `finance.db`
+- Database: SQLite via `finance.db` locally, PostgreSQL via `DATABASE_URL` or `SOF_DATABASE_URL`
 - Local secret: `secret.key` or `SOF_SECRET_KEY`
 
 ## File Layout
 
 - [app.py](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/app.py): Flask app, database setup, migrations, API routes, stock/rate fetchers
 - [schema.sql](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/schema.sql): base SQLite schema
+- [schema_postgres.sql](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/schema_postgres.sql): PostgreSQL schema for hosted deployments
 - [templates/index.html](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/templates/index.html): single-page shell and modal markup
 - [static/app.js](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/static/app.js): client-side state, rendering, modal flows, API calls, charts
 - [requirements.txt](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/requirements.txt): Python dependency list
 - [secret.key](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/secret.key): locally generated Flask session secret, created on first startup and gitignored
+- [render.yaml](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/render.yaml): optional Render Blueprint for a web service plus Render Postgres
 
 ## How The App Works
 
@@ -40,7 +42,7 @@ The app is effectively a single-page dashboard:
 3. Logged-out users stay in the auth shell and use sign-in, sign-up, activate-existing, or forgot-password flows.
 4. Logged-in users move into the finance app, which then loads rates, accounts, buckets, and summary data for the selected read scope.
 5. UI actions call JSON API endpoints under `/api/...`.
-6. The backend reads and writes SQLite directly and returns JSON rows as plain dictionaries.
+6. The backend reads and writes the configured database directly and returns JSON rows as plain dictionaries.
 
 There is still no background worker, ORM, or build step.
 
@@ -144,7 +146,7 @@ Rates come from `/api/rates`, backed by `https://open.er-api.com/v6/latest/USD`,
 
 ## Database Model
 
-Defined in [schema.sql](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/schema.sql).
+Defined in [schema.sql](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/schema.sql) for SQLite and [schema_postgres.sql](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/schema_postgres.sql) for PostgreSQL.
 
 ### `users`
 
@@ -293,10 +295,10 @@ Key columns:
 
 In [app.py](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/app.py):
 
-- `get_db()` creates one SQLite connection per request and enables foreign keys
+- `get_db()` creates one database connection per request and selects SQLite or PostgreSQL from environment configuration
 - `close_db()` closes that connection on teardown
-- `init_db()` runs [schema.sql](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/schema.sql)
-- `migrate_db()` applies idempotent schema evolution for older databases
+- `init_db()` runs [schema.sql](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/schema.sql) or [schema_postgres.sql](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/schema_postgres.sql) based on the active backend
+- `migrate_db()` applies idempotent schema evolution for older SQLite databases
 - `_load_secret_key()` creates `secret.key` on first startup with a 32-byte hex secret and reuses it on later starts
 
 ### Migrations currently handled in code
@@ -501,7 +503,7 @@ The timeline endpoint does more than just aggregate raw rows.
 
 For each active account:
 
-1. Entries are grouped into periods using SQLite `strftime`.
+1. Entries are grouped into day, week, or month periods in Python from each entry timestamp.
 2. If multiple entries exist in the same period, the last row encountered for that period wins.
 3. Missing later periods are forward-filled with the previous known value.
 4. Net worth is computed as the sum of all account series at each period.
@@ -581,6 +583,8 @@ On startup, the app:
 
 Optional runtime environment variables:
 
+- `DATABASE_URL`: PostgreSQL connection string for hosted deployments
+- `SOF_DATABASE_URL`: alternate name for the PostgreSQL connection string
 - `SOF_DATA_DIR`: base directory for persisted app data such as `finance.db` and `secret.key`
 - `SOF_DB_PATH`: explicit SQLite file path, overrides `SOF_DATA_DIR`
 - `SOF_SECRET_KEY`: explicit Flask secret value, preferred for hosted deployments
@@ -588,40 +592,43 @@ Optional runtime environment variables:
 
 ## Deploying On Render
 
-This repo now includes [render.yaml](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/render.yaml) for a Render web service.
+Recommended Render setup is a web service plus Render Postgres. The app switches to PostgreSQL automatically when `DATABASE_URL` is set.
 
-Recommended setup for this app on Render:
+Manual setup for Render free tier:
 
-- use a paid web service plan with a persistent disk, because SQLite data is lost on Render's default ephemeral filesystem
-- keep the app on a single instance, because a Render persistent disk can only be attached to one running service instance at a time
-- let Render generate `SOF_SECRET_KEY`
-- store app data under `/var/data` via `SOF_DATA_DIR`
+1. Push this repo to GitHub.
+2. In Render, create a new `Postgres` service.
+3. Choose the `Free` Postgres plan if you are testing or using a hobby deployment.
+4. In Render, create a new `Web Service` from the same repo.
+5. Choose:
+   - Runtime: `Python 3`
+   - Instance type: `Free` or higher
+   - Build command: `pip install -r requirements.txt`
+   - Start command: `gunicorn --workers 1 --threads 4 wsgi:application`
+   - Health check path: `/healthz`
+6. Add environment variables on the web service:
+   - `DATABASE_URL`: the connection string from your Render Postgres instance
+   - `SOF_SECRET_KEY`: a generated random secret
+7. Deploy the web service.
 
-The included Blueprint config does this by:
+The optional [render.yaml](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/render.yaml) describes the same architecture for teams that use Render Blueprints.
 
 - installing dependencies with `pip install -r requirements.txt`
 - starting the app with `gunicorn --workers 1 --threads 4 wsgi:application`
-- mounting a persistent disk at `/var/data`
-- persisting the SQLite database and secret key under that mount path
+- reading the database connection string from `DATABASE_URL`
 - exposing a lightweight health check at `/healthz`
 
-Deploy flow:
+Important Render notes:
 
-1. Push this project to GitHub.
-2. In Render, create a new Blueprint or Web Service from that repo.
-3. If you use the included Blueprint, Render will provision the service and disk from `render.yaml`.
-4. If you configure it manually, use the same build command, start command, disk mount path, and environment variables from [render.yaml](/Users/shahidmukadam/Library/CloudStorage/OneDrive-Personal/Projects/CCode/mac/state-of-finance/render.yaml).
-
-Important SQLite note:
-
-- This setup is fine for a small personal app, but SQLite on Render is still single-disk, single-instance infrastructure. If you later want horizontal scaling or stronger durability guarantees, move the app to Postgres.
+- Render free web services spin down after inactivity and use an ephemeral local filesystem, so PostgreSQL is the right place to persist data.
+- Render free Postgres is suitable for testing and hobby use, but Render documents that free Postgres instances expire 30 days after creation.
 
 ## Current Constraints And Quirks
 
 - Network calls to exchange-rate and stock-price APIs happen synchronously during requests.
 - OTP delivery is local-only; the app shows the latest code in an in-app inbox instead of sending real email.
 - The test suite is an in-repo `unittest` suite run via `python run_tests.py`.
-- A deployment package should not include `finance.db` or `secret.key`; both are created locally on first run.
+- A deployment package should not include `finance.db` or `secret.key`; those are only for local SQLite-backed runs.
 - The UI prevents manual entries for loans and shares, but the backend route does not validate asset type.
 - Timeline y-axis tick labels are hardcoded with `$`, even though the app displays AED/INR elsewhere.
 - The frontend only rerenders the dashboard when currency changes; assets, buckets, and open modals can show stale formatting until reopened or reloaded.

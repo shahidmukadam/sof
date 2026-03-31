@@ -12,10 +12,21 @@ from functools import wraps
 from flask import Flask, g, jsonify, render_template, request, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
+try:
+    import psycopg
+    from psycopg.rows import dict_row as pg_dict_row
+except ImportError:
+    psycopg = None
+    pg_dict_row = None
+
 APP_DIR = os.path.dirname(__file__)
 DATA_DIR = os.environ.get('SOF_DATA_DIR', APP_DIR)
 DB_PATH = os.environ.get('SOF_DB_PATH', os.path.join(DATA_DIR, 'finance.db'))
 SECRET_KEY_PATH = os.environ.get('SOF_SECRET_KEY_PATH', os.path.join(DATA_DIR, 'secret.key'))
+DATABASE_URL = os.environ.get('DATABASE_URL') or os.environ.get('SOF_DATABASE_URL') or ''
+if DATABASE_URL.startswith('postgres://'):
+    DATABASE_URL = 'postgresql://' + DATABASE_URL[len('postgres://'):]
+DB_BACKEND = 'postgres' if DATABASE_URL else 'sqlite'
 BUCKET_ALLOCATION_TYPES = {'auto', 'manual'}
 OTP_PURPOSES = {'signup', 'activate_existing', 'reset_password'}
 OTP_TTL_MINUTES = 10
@@ -23,12 +34,113 @@ OTP_RESEND_SECONDS = 60
 OTP_MAX_ATTEMPTS = 3
 READ_SCOPES = {'me', 'all'}
 PASSWORD_HASH_METHOD = 'pbkdf2:sha256:600000'
+_POSTGRES_RETURNING_ID_TABLES = {
+    'families',
+    'users',
+    'auth_accounts',
+    'accounts',
+    'balance_entries',
+    'buckets',
+    'bucket_allocations',
+    'otp_challenges',
+    'local_otp_outbox',
+    'transactions',
+}
+
+
+class PostgresCompatCursor:
+    def __init__(self, cursor, prefetched_rows=None, lastrowid=None):
+        self._cursor = cursor
+        self._prefetched_rows = list(prefetched_rows or [])
+        self.lastrowid = lastrowid
+
+    def fetchone(self):
+        if self._prefetched_rows:
+            return self._prefetched_rows.pop(0)
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        rows = list(self._prefetched_rows)
+        self._prefetched_rows.clear()
+        rows.extend(self._cursor.fetchall())
+        return rows
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
+class PostgresCompatConnection:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, query, params=None):
+        sql, capture_lastrowid = _rewrite_query_for_postgres(query)
+        args = None if params is None else tuple(params)
+        cursor = self._conn.execute(sql) if args is None else self._conn.execute(sql, args)
+
+        prefetched_rows = []
+        lastrowid = None
+        if capture_lastrowid:
+            row = cursor.fetchone()
+            if row is not None:
+                prefetched_rows.append(row)
+                if isinstance(row, dict):
+                    lastrowid = row.get('id')
+                else:
+                    lastrowid = row[0]
+
+        return PostgresCompatCursor(cursor, prefetched_rows=prefetched_rows, lastrowid=lastrowid)
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
 
 
 def _ensure_parent_dir(path):
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
+
+
+def _postgres_now_text_sql():
+    return """to_char(timezone('utc', now()), 'YYYY-MM-DD"T"HH24:MI:SS')"""
+
+
+def _rewrite_query_for_postgres(query):
+    sql = query
+    capture_lastrowid = False
+
+    match = re.match(r'\s*INSERT\s+INTO\s+([a-z_][a-z0-9_]*)\b', sql, re.IGNORECASE)
+    if match and 'RETURNING' not in sql.upper():
+        table = match.group(1).lower()
+        if table in _POSTGRES_RETURNING_ID_TABLES:
+            sql = sql.rstrip() + ' RETURNING id'
+            capture_lastrowid = True
+
+    sql = sql.replace('?', '%s')
+    sql = sql.replace("datetime('now')", _postgres_now_text_sql())
+    return sql, capture_lastrowid
+
+
+def _connect_postgres():
+    if psycopg is None or pg_dict_row is None:
+        raise RuntimeError('PostgreSQL support requires psycopg. Install dependencies from requirements.txt.')
+    conn = psycopg.connect(DATABASE_URL, row_factory=pg_dict_row)
+    return PostgresCompatConnection(conn)
+
+
+def _execute_sql_script(conn, script):
+    statements = [statement.strip() for statement in script.split(';') if statement.strip()]
+    for statement in statements:
+        conn.execute(statement)
 
 
 def _load_secret_key():
@@ -90,11 +202,24 @@ def _dt_str(value):
 def _dt_or_none(value):
     if not value:
         return None
+    if isinstance(value, datetime):
+        return value.replace(microsecond=0)
     text = str(value).strip().replace(' ', 'T')
     try:
         return datetime.fromisoformat(text)
     except ValueError:
         return None
+
+
+def _period_label(value, interval):
+    dt = _dt_or_none(value)
+    if not dt:
+        return None
+    if interval == 'day':
+        return dt.strftime('%Y-%m-%d')
+    if interval == 'week':
+        return dt.strftime('%Y-W%W')
+    return dt.strftime('%Y-%m')
 
 
 def _normalize_email(value):
@@ -117,10 +242,13 @@ def _json_error(message, status=400, **extra):
 
 def get_db():
     if 'db' not in g:
-        _ensure_parent_dir(DB_PATH)
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
+        if DB_BACKEND == 'postgres':
+            g.db = _connect_postgres()
+        else:
+            _ensure_parent_dir(DB_PATH)
+            g.db = sqlite3.connect(DB_PATH)
+            g.db.row_factory = sqlite3.Row
+            g.db.execute("PRAGMA foreign_keys = ON")
     return g.db
 
 
@@ -132,16 +260,31 @@ def close_db(exc):
 
 
 def init_db():
-    schema = os.path.join(APP_DIR, 'schema.sql')
+    schema_name = 'schema_postgres.sql' if DB_BACKEND == 'postgres' else 'schema.sql'
+    schema = os.path.join(APP_DIR, schema_name)
+    with open(schema, 'r', encoding='utf-8') as f:
+        script = f.read()
+
+    if DB_BACKEND == 'postgres':
+        conn = _connect_postgres()
+        try:
+            _execute_sql_script(conn, script)
+            conn.commit()
+        finally:
+            conn.close()
+        return
+
     _ensure_parent_dir(DB_PATH)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("PRAGMA foreign_keys = ON")
-        with open(schema, 'r', encoding='utf-8') as f:
-            conn.executescript(f.read())
+        conn.executescript(script)
 
 
 def migrate_db():
     """Idempotent migrations for existing databases."""
+    if DB_BACKEND == 'postgres':
+        return
+
     _ensure_parent_dir(DB_PATH)
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
@@ -998,9 +1141,9 @@ def _auto_price_and_entry(db, account_id):
 
     db.execute("""
         UPDATE share_details
-        SET last_price=?, last_price_currency=?, last_fetched=datetime('now')
+        SET last_price=?, last_price_currency=?, last_fetched=?
         WHERE account_id=?
-    """, (price, currency, account_id))
+    """, (price, currency, _dt_str(_utc_now()), account_id))
 
     db.execute(
         "INSERT INTO balance_entries (account_id, amount, note) VALUES (?,?,?)",
@@ -2364,13 +2507,6 @@ def timeline():
     date_from = request.args.get('from', '')
     date_to = request.args.get('to', '')
 
-    if interval == 'day':
-        fmt = '%Y-%m-%d'
-    elif interval == 'week':
-        fmt = '%Y-W%W'
-    else:
-        fmt = '%Y-%m'
-
     user_id, family_id = _scope_filters(scope)
     db = get_db()
     params_accounts = []
@@ -2396,7 +2532,7 @@ def timeline():
 
     for acc in accounts:
         rows = db.execute(f"""
-            SELECT strftime('{fmt}', recorded_at) AS period, amount
+            SELECT recorded_at, amount
             FROM balance_entries be
             WHERE account_id=? {where}
             ORDER BY recorded_at
@@ -2404,7 +2540,10 @@ def timeline():
 
         period_map = {}
         for r in rows:
-            period_map[r['period']] = r['amount']
+            period = _period_label(r['recorded_at'], interval)
+            if period is None:
+                continue
+            period_map[period] = r['amount']
         all_periods.update(period_map.keys())
         account_series.append({'account': dict(acc), 'data': period_map})
 
