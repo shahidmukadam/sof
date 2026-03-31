@@ -179,7 +179,7 @@
           <option value="me">My Profile</option>
           <option value="all">All Users</option>
         </select>
-        <div class="flex items-center gap-1.5">
+        <div id="currencyToggleGroup" class="flex items-center gap-1.5">
           <div class="bg-slate-700 rounded-lg p-0.5 flex">
             <button id="btn-AED" onclick="setCurrency('AED')" class="currency-btn px-3 py-1.5 rounded-md text-sm font-medium transition-colors bg-slate-600 text-white">د.إ AED</button>
             <button id="btn-INR" onclick="setCurrency('INR')" class="currency-btn px-3 py-1.5 rounded-md text-sm font-medium transition-colors text-slate-400 hover:text-white">₹ INR</button>
@@ -189,6 +189,7 @@
         <button id="mainAddEntryBtn" onclick="openAddEntry()" class="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
           + Add Balance Entry
         </button>
+        <button onclick="startOnboarding()" title="Take a guided tour" class="bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white w-9 h-9 rounded-lg text-sm font-bold transition-colors flex items-center justify-center">?</button>
         <button id="logoutBtn" onclick="logout()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-4 py-2 rounded-lg text-sm transition-colors">
           Logout
         </button>
@@ -371,20 +372,22 @@
                 <input id="loanTenure" type="number" step="1" min="0" placeholder="e.g. 240" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
               </div>
             </div>
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">Loan Currency</label>
+              <select id="loanAmountCurrency" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500">
+                <option value="AED">AED – UAE Dirham</option>
+                <option value="INR">INR – Indian Rupee</option>
+                <option value="USD">USD – US Dollar</option>
+              </select>
+            </div>
             <div class="grid grid-cols-2 gap-3">
               <div>
-                <label id="loanEMILabel" class="text-xs text-slate-400 block mb-1">Monthly EMI (AED)</label>
-                <div class="relative">
-                  <span id="loanEMIPrefix" class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs pointer-events-none font-medium">AED</span>
-                  <input id="loanEMI" type="number" step="0.01" min="0" placeholder="0.00" class="w-full bg-slate-700 border border-slate-600 rounded-lg pl-12 pr-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
-                </div>
+                <label class="text-xs text-slate-400 block mb-1">Monthly EMI</label>
+                <input id="loanEMI" type="number" step="0.01" min="0" placeholder="0.00" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
               </div>
               <div>
-                <label id="loanPrincipalLabel" class="text-xs text-slate-400 block mb-1">Remaining Principal (AED)</label>
-                <div class="relative">
-                  <span id="loanPrincipalPrefix" class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs pointer-events-none font-medium">AED</span>
-                  <input id="loanPrincipal" type="number" step="0.01" min="0" placeholder="0.00" class="w-full bg-slate-700 border border-slate-600 rounded-lg pl-12 pr-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
-                </div>
+                <label class="text-xs text-slate-400 block mb-1">Remaining Principal</label>
+                <input id="loanPrincipal" type="number" step="0.01" min="0" placeholder="0.00" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
               </div>
             </div>
           </div>
@@ -441,10 +444,14 @@
           </div>
           <div class="grid grid-cols-2 gap-3">
             <div>
-              <label id="entAmountLabel" class="text-xs text-slate-400 block mb-1">Balance Amount (AED) *</label>
-              <div class="relative">
-                <span id="entAmountPrefix" class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs pointer-events-none font-medium">AED</span>
-                <input id="entAmount" type="number" step="0.01" placeholder="0.00" oninput="updateAllocRemaining()" class="w-full bg-slate-700 border border-slate-600 rounded-lg pl-12 pr-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+              <label class="text-xs text-slate-400 block mb-1">Balance Amount *</label>
+              <div class="flex gap-1.5">
+                <select id="entAmountCurrency" class="bg-slate-700 border border-slate-600 rounded-lg px-2 py-2 text-sm focus:outline-none focus:border-indigo-500 w-20 shrink-0">
+                  <option value="AED">AED</option>
+                  <option value="INR">INR</option>
+                  <option value="USD">USD</option>
+                </select>
+                <input id="entAmount" type="number" step="0.01" placeholder="0.00" oninput="updateAllocRemaining()" class="flex-1 min-w-0 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
               </div>
             </div>
             <div>
@@ -543,10 +550,14 @@
           </div>
 
           <div>
-            <label id="txnAmountLabel" class="text-xs text-slate-400 block mb-1">Amount (AED) *</label>
-            <div class="relative">
-              <span id="txnAmountPrefix" class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs pointer-events-none font-medium">AED</span>
-              <input id="txnAmount" type="number" step="0.01" min="0.01" placeholder="0.00" class="w-full bg-slate-700 border border-slate-600 rounded-lg pl-12 pr-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+            <label class="text-xs text-slate-400 block mb-1">Amount *</label>
+            <div class="flex gap-1.5">
+              <select id="txnAmountCurrency" class="bg-slate-700 border border-slate-600 rounded-lg px-2 py-2 text-sm focus:outline-none focus:border-indigo-500 w-20 shrink-0">
+                <option value="AED">AED</option>
+                <option value="INR">INR</option>
+                <option value="USD">USD</option>
+              </select>
+              <input id="txnAmount" type="number" step="0.01" min="0.01" placeholder="0.00" class="flex-1 min-w-0 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
             </div>
           </div>
 
@@ -566,6 +577,45 @@
           <button onclick="closeModal('transactionModal')" class="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded-lg text-sm transition-colors">Cancel</button>
           <button onclick="saveTransaction()" class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-2 rounded-lg text-sm font-medium transition-colors">Save</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Coach Marks Overlay ─────────────────────────────────────────────── -->
+  <div id="coachOverlay" class="fixed inset-0 hidden" style="z-index:3000;">
+    <!-- Spotlight: box-shadow creates the dark surround with a transparent "hole" -->
+    <div id="coachSpotlight" class="fixed rounded-xl hidden"
+         style="box-shadow:0 0 0 9999px rgba(0,0,0,0.78); pointer-events:none; transition:top .25s,left .25s,width .25s,height .25s; z-index:3001;"></div>
+
+    <!-- Tooltip card -->
+    <div id="coachCard" class="fixed bg-slate-800 border border-indigo-500/50 rounded-2xl shadow-2xl"
+         style="width:340px; z-index:3002; pointer-events:auto; transition:top .25s,left .25s;">
+      <!-- Arrow indicator (optional visual hint toward target) -->
+      <div id="coachArrow" class="hidden absolute w-3 h-3 bg-slate-800 border-l border-t border-indigo-500/50 rotate-45" style="z-index:3003;"></div>
+
+      <div class="p-5">
+        <!-- Header row -->
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center gap-2">
+            <span id="coachStepLabel" class="text-[11px] font-semibold uppercase tracking-widest text-indigo-400"></span>
+          </div>
+          <button onclick="skipOnboarding()" class="text-slate-500 hover:text-slate-300 text-xs underline transition-colors">Skip tour</button>
+        </div>
+
+        <!-- Progress dots -->
+        <div id="coachDots" class="flex gap-1 mb-4"></div>
+
+        <!-- Content -->
+        <h3 id="coachTitle" class="text-base font-semibold text-white mb-2 leading-snug"></h3>
+        <p id="coachDesc" class="text-sm text-slate-300 leading-relaxed whitespace-pre-line"></p>
+      </div>
+
+      <!-- Footer -->
+      <div class="flex gap-2 px-5 pb-5">
+        <button id="coachPrev" onclick="prevCoachStep()"
+          class="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded-lg text-sm transition-colors">← Back</button>
+        <button id="coachNext" onclick="nextCoachStep()"
+          class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-2 rounded-lg text-sm font-medium transition-colors">Next →</button>
       </div>
     </div>
   </div>

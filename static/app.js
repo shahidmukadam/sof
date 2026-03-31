@@ -59,6 +59,15 @@ function toUSD(v) {
   return v / (state.rates[state.currency] || 1);
 }
 
+function toUSDWithCurrency(v, currency) {
+  if (!currency || currency === 'USD') return v;
+  return v / (state.rates[currency] || 1);
+}
+
+function modalCurrencySymbol(currency) {
+  return { AED: 'AED', INR: '₹', USD: '$' }[currency] || currency;
+}
+
 function currencySymbol() {
   return { AED: 'AED', INR: '₹' }[state.currency] || state.currency;
 }
@@ -574,6 +583,7 @@ async function handleAuthenticated(sessionPayload) {
   if (!document.getElementById('tab-timeline').classList.contains('hidden')) {
     await loadTimeline();
   }
+  _maybeStartOnboarding();
 }
 
 async function checkSession() {
@@ -810,6 +820,8 @@ function openAccountModal(id = null) {
     if (isLoan) {
       document.getElementById('loanRate').value = acc.interest_rate ?? '';
       document.getElementById('loanTenure').value = acc.remaining_tenure ?? '';
+      const loanCurrSel = document.getElementById('loanAmountCurrency');
+      if (loanCurrSel) loanCurrSel.value = state.currency;
       const rate = state.rates[state.currency] || 1;
       document.getElementById('loanEMI').value = acc.monthly_emi ? (acc.monthly_emi * rate).toFixed(2) : '';
       document.getElementById('loanPrincipal').value = acc.remaining_principal ? (acc.remaining_principal * rate).toFixed(2) : '';
@@ -830,6 +842,8 @@ function openAccountModal(id = null) {
       document.getElementById(id).value = '';
     });
     document.getElementById('shareExchange').value = 'DFM';
+    const loanCurrSel = document.getElementById('loanAmountCurrency');
+    if (loanCurrSel) loanCurrSel.value = state.currency;
   }
   updateCurrencyLabels();
   openModal('accountModal');
@@ -845,10 +859,11 @@ async function saveAccount() {
 
   const payload = { name, type, institution };
   if (type === 'loan') {
+    const loanCurrency = document.getElementById('loanAmountCurrency')?.value || state.currency;
     payload.interest_rate = parseFloat(document.getElementById('loanRate').value) || 0;
     payload.remaining_tenure = parseInt(document.getElementById('loanTenure').value) || 0;
-    payload.monthly_emi = toUSD(parseFloat(document.getElementById('loanEMI').value) || 0);
-    payload.remaining_principal = toUSD(parseFloat(document.getElementById('loanPrincipal').value) || 0);
+    payload.monthly_emi = toUSDWithCurrency(parseFloat(document.getElementById('loanEMI').value) || 0, loanCurrency);
+    payload.remaining_principal = toUSDWithCurrency(parseFloat(document.getElementById('loanPrincipal').value) || 0, loanCurrency);
   }
   if (type === 'shares') {
     payload.stock_name = document.getElementById('shareStockName').value.trim();
@@ -1192,6 +1207,8 @@ function openAddEntry(accountId = null) {
   document.getElementById('entDate').value = nowLocal();
   document.getElementById('entNote').value = '';
   document.getElementById('allocRemaining').textContent = '';
+  const entCurrSel = document.getElementById('entAmountCurrency');
+  if (entCurrSel) entCurrSel.value = state.currency;
   onEntryAccountChange();
   openModal('entryModal');
   setTimeout(() => document.getElementById('entAmount').focus(), 50);
@@ -1220,7 +1237,8 @@ function onEntryAccountChange() {
     return;
   }
 
-  const sym = currencySymbol();
+  const modalCur = document.getElementById('entAmountCurrency')?.value || state.currency;
+  const sym = modalCurrencySymbol(modalCur);
   allocRows.innerHTML = manualBuckets.map(b => `
     <div class="flex items-center gap-2">
       <span class="inline-block w-2 h-2 rounded-full" style="background:${b.color}"></span>
@@ -1246,7 +1264,8 @@ function updateAllocRemaining() {
     el.textContent = '';
     return;
   }
-  el.textContent = `${getFmt(state.currency).format(remaining)} unallocated`;
+  const entCur = document.getElementById('entAmountCurrency')?.value || state.currency;
+  el.textContent = `${getFmt(entCur).format(remaining)} unallocated`;
   el.className = `text-xs ${Math.abs(remaining) < 0.01 ? 'text-emerald-400' : 'text-amber-400'}`;
 }
 
@@ -1256,13 +1275,14 @@ async function saveEntry() {
   const rawAmount = parseFloat(document.getElementById('entAmount').value);
   if (!account_id || Number.isNaN(rawAmount)) return;
 
-  const amount = toUSD(rawAmount);
+  const entryCurrency = document.getElementById('entAmountCurrency')?.value || state.currency;
+  const amount = toUSDWithCurrency(rawAmount, entryCurrency);
   const recorded_at = document.getElementById('entDate').value;
   const note = document.getElementById('entNote').value.trim();
   const allocations = getEntryAllocatableBuckets()
     .map(b => ({
       bucket_id: b.id,
-      amount: toUSD(parseFloat(document.getElementById(`alloc_${b.id}`)?.value) || 0),
+      amount: toUSDWithCurrency(parseFloat(document.getElementById(`alloc_${b.id}`)?.value) || 0, entryCurrency),
     }))
     .filter(a => a.amount > 0);
 
@@ -1374,22 +1394,12 @@ async function fetchRates() {
 
 function updateCurrencyLabels() {
   const sym = currencySymbol();
-  const entLbl = document.getElementById('entAmountLabel');
-  if (entLbl) entLbl.textContent = `Balance Amount (${sym}) *`;
-  const entPfx = document.getElementById('entAmountPrefix');
-  if (entPfx) entPfx.textContent = sym;
+  // Bucket modal target (still uses static prefix)
   const bktLbl = document.getElementById('bktTargetLabel');
   if (bktLbl) bktLbl.textContent = `Target Amount (${sym}, optional)`;
   const bktPfx = document.getElementById('bktTargetPrefix');
   if (bktPfx) bktPfx.textContent = sym;
-  const loanEMILbl = document.getElementById('loanEMILabel');
-  if (loanEMILbl) loanEMILbl.textContent = `Monthly EMI (${sym})`;
-  const loanEMIPfx = document.getElementById('loanEMIPrefix');
-  if (loanEMIPfx) loanEMIPfx.textContent = sym;
-  const loanPrinLbl = document.getElementById('loanPrincipalLabel');
-  if (loanPrinLbl) loanPrinLbl.textContent = `Remaining Principal (${sym})`;
-  const loanPrinPfx = document.getElementById('loanPrincipalPrefix');
-  if (loanPrinPfx) loanPrinPfx.textContent = sym;
+  // Manual allocate modal (still uses static prefix)
   const manualAvailLbl = document.getElementById('manualAllocAvailableLabel');
   if (manualAvailLbl) manualAvailLbl.textContent = `Unallocated Fund (${sym})`;
   const manualAvailPfx = document.getElementById('manualAllocAvailablePrefix');
@@ -1559,12 +1569,9 @@ function openTransactionModal() {
   document.getElementById('txnDate').value = nowLocal();
   document.getElementById('txnError').textContent = '';
 
-  // Update currency labels
-  const sym = currencySymbol();
-  const amountLabel = document.getElementById('txnAmountLabel');
-  const amountPrefix = document.getElementById('txnAmountPrefix');
-  if (amountLabel) amountLabel.textContent = `Amount (${sym}) *`;
-  if (amountPrefix) amountPrefix.textContent = sym;
+  // Default currency dropdown to current global currency
+  const txnCurrSel = document.getElementById('txnAmountCurrency');
+  if (txnCurrSel) txnCurrSel.value = state.currency;
 
   populateTxnAccountSelects();
   setTxnType('credit'); // default to credit
@@ -1574,7 +1581,8 @@ function openTransactionModal() {
 async function saveTransaction() {
   const type = state.txnType;
   const amountDisplay = parseFloat(document.getElementById('txnAmount').value) || 0;
-  const amountUSD = toUSD(amountDisplay);
+  const txnCurrency = document.getElementById('txnAmountCurrency')?.value || state.currency;
+  const amountUSD = toUSDWithCurrency(amountDisplay, txnCurrency);
   const counterparty = document.getElementById('txnCounterparty').value.trim();
   const note = document.getElementById('txnNote').value.trim();
   const dateVal = document.getElementById('txnDate').value;
@@ -1657,3 +1665,299 @@ async function init() {
 }
 
 init();
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Onboarding / Coach Marks
+// ══════════════════════════════════════════════════════════════════════════════
+
+const _ONBOARDING_KEY = 'sof_onboarding_v1';
+
+// Each step: { tab, target (CSS selector|null), placement, title, desc, isLast }
+const COACH_STEPS = [
+  {
+    tab: 'dashboard',
+    target: null,
+    placement: 'center',
+    title: '👋 Welcome to State of Finance',
+    desc: 'Your personal wealth tracker — built for families managing assets across UAE and India.\n\nThis two-minute tour walks you through every feature. You can skip at any time.',
+  },
+  {
+    tab: 'dashboard',
+    target: '#currencyToggleGroup',
+    placement: 'bottom',
+    title: '💱 Currency Toggle',
+    desc: 'Switch between AED (UAE Dirham) and INR (Indian Rupee). Every amount across the entire app — balances, buckets, transactions — instantly converts using live exchange rates.',
+  },
+  {
+    tab: 'dashboard',
+    target: '#scopeSelect',
+    placement: 'bottom',
+    title: '👥 Personal vs Family View',
+    desc: '"My Profile" shows only your own assets and buckets.\n\n"All Users" merges your entire family\'s data into one combined household view — perfect for a whole-family financial snapshot.',
+  },
+  {
+    tab: 'dashboard',
+    target: '#netWorthTotal',
+    placement: 'bottom',
+    title: '💰 Total Net Worth',
+    desc: 'Your net worth at a glance — sum of all bank balances, investments, and shares, minus outstanding loan principals. Updates automatically whenever you add a balance entry.',
+  },
+  {
+    tab: 'dashboard',
+    target: '#unallocatedCashTotal',
+    placement: 'bottom',
+    title: '🏦 Unallocated Cash',
+    desc: 'The portion of your bank balance not yet assigned to any goal bucket. This is your "free" money. Assign it to buckets to give every dirham a purpose.',
+  },
+  {
+    tab: 'dashboard',
+    target: '#byTypeBreakdown',
+    placement: 'top',
+    title: '📊 Asset Type Breakdown',
+    desc: 'See how your wealth is spread across Banks, Investments, Shares, and how much you owe on Loans. Great for spotting imbalances in your asset allocation.',
+  },
+  {
+    tab: 'dashboard',
+    target: '#bucketSummary',
+    placement: 'top',
+    title: '🎯 Bucket Progress',
+    desc: 'Each bucket represents a financial goal (Emergency Fund, School Fees, Vacation…). The progress bar shows allocated vs target. Green = fully funded. Amber = partially funded.',
+  },
+  {
+    tab: 'dashboard',
+    target: '#recentEntries',
+    placement: 'top',
+    title: '📋 Recent Balance Entries',
+    desc: 'The latest balance snapshots recorded across all your assets. State of Finance is snapshot-based — add an entry whenever a balance changes to keep your net worth accurate.',
+  },
+  {
+    tab: 'dashboard',
+    target: '#mainAddEntryBtn',
+    placement: 'bottom',
+    title: '➕ Add Balance Entry',
+    desc: 'Record a point-in-time snapshot of any asset\'s balance. For bank accounts you can also split the balance across bucket goals right here. Pick your currency per entry.',
+  },
+  {
+    tab: 'accounts',
+    target: '[data-tab="accounts"]',
+    placement: 'bottom',
+    title: '🏛️ Assets Tab',
+    desc: 'Everything you own (or owe) lives here. Four asset types:\n\n• Bank Account — savings or current accounts\n• Loan — mortgage or debt (tracked as negative)\n• Shares — stocks with live price auto-fetch\n• Investment Group — mutual funds, crypto, portfolios',
+  },
+  {
+    tab: 'accounts',
+    target: '#addAssetBtn',
+    placement: 'bottom',
+    title: '+ Add Asset',
+    desc: 'Tap here to create a new asset. For Shares, just enter the stock code and exchange — the latest market price is fetched automatically. Use ↻ Refresh on the card to update anytime.',
+  },
+  {
+    tab: 'buckets',
+    target: '[data-tab="buckets"]',
+    placement: 'bottom',
+    title: '🪣 Buckets Tab',
+    desc: 'Buckets are named savings goals or reserves — Emergency Fund, Vacation, School Fees, Car Down-payment. Money allocated to buckets is "spoken for" and subtracted from your free cash.',
+  },
+  {
+    tab: 'buckets',
+    target: '#addBucketBtn',
+    placement: 'bottom',
+    title: '+ Add Bucket',
+    desc: 'Create a bucket with a name, target amount, and color. Choose the allocation type:\n\n• Manual — you allocate exactly how much\n• Auto — filled automatically from bank cash when you click Allocate',
+  },
+  {
+    tab: 'buckets',
+    target: '#autoAllocateBtn',
+    placement: 'bottom',
+    title: '⚡ Auto Allocate',
+    desc: 'Fills all Auto-type buckets from available bank cash in priority order (sort order on each bucket). Run this right after recording a salary credit to instantly fund your goals.',
+  },
+  {
+    tab: 'transactions',
+    target: '[data-tab="transactions"]',
+    placement: 'bottom',
+    title: '💸 Transactions Tab',
+    desc: 'Record every money movement — income, expenses, and transfers. Transactions automatically update the affected asset balances, so you don\'t need to manually add a balance entry.',
+  },
+  {
+    tab: 'transactions',
+    target: '#addTransactionBtn',
+    placement: 'bottom',
+    title: '+ New Transaction — 3 Types',
+    desc: '• Credit — money in (salary, rental income). Choose the destination account and counterparty name.\n\n• Debit — money out (DEWA, rent, groceries). Blocked automatically if the amount exceeds the account balance.\n\n• Transfer — move money between your own assets (bank → investment account).',
+  },
+  {
+    tab: 'timeline',
+    target: '[data-tab="timeline"]',
+    placement: 'bottom',
+    title: '📈 Timeline',
+    desc: 'View your net worth and individual asset trends over time. Group by Day, Week, or Month. Filter by date range to zoom into any period. Hover chart lines to see exact values.',
+  },
+  {
+    tab: 'dashboard',
+    target: null,
+    placement: 'center',
+    title: '🎉 You\'re all set!',
+    desc: 'Start by adding your first asset → record a balance entry → create some buckets → track transactions.\n\nClick the ? button in the top bar anytime to replay this tour.',
+    isLast: true,
+  },
+];
+
+let _coachStep = 0;
+
+function startOnboarding() {
+  _coachStep = 0;
+  document.getElementById('coachOverlay').classList.remove('hidden');
+  _showCoachStep(0);
+}
+
+function skipOnboarding() {
+  document.getElementById('coachOverlay').classList.add('hidden');
+  localStorage.setItem(_ONBOARDING_KEY, '1');
+  // Return to dashboard
+  switchTab('dashboard');
+}
+
+function nextCoachStep() {
+  if (_coachStep >= COACH_STEPS.length - 1) {
+    skipOnboarding();
+    return;
+  }
+  _coachStep++;
+  _showCoachStep(_coachStep);
+}
+
+function prevCoachStep() {
+  if (_coachStep <= 0) return;
+  _coachStep--;
+  _showCoachStep(_coachStep);
+}
+
+function _showCoachStep(index) {
+  const step = COACH_STEPS[index];
+  // Switch tab first, then position after DOM settles
+  if (step.tab) switchTab(step.tab);
+  const delay = step.tab ? 160 : 0;
+  setTimeout(() => _renderCoachStep(step, index), delay);
+}
+
+function _renderCoachStep(step, index) {
+  const total = COACH_STEPS.length;
+  const overlay  = document.getElementById('coachOverlay');
+  const spotlight = document.getElementById('coachSpotlight');
+  const card     = document.getElementById('coachCard');
+  const arrow    = document.getElementById('coachArrow');
+
+  // ── Content ───────────────────────────────────────────────────────────────
+  document.getElementById('coachStepLabel').textContent = `Step ${index + 1} of ${total}`;
+  document.getElementById('coachTitle').textContent = step.title;
+  document.getElementById('coachDesc').textContent = step.desc;
+
+  // Progress dots
+  const dots = document.getElementById('coachDots');
+  dots.innerHTML = Array.from({ length: total }, (_, i) => {
+    const active = i === index;
+    const done   = i < index;
+    return `<span class="inline-block rounded-full transition-all duration-200"
+      style="width:${active ? 20 : 6}px; height:6px;
+             background:${active ? '#6366f1' : done ? '#4f46e5' : '#374151'}"></span>`;
+  }).join('');
+
+  // Prev / Next buttons
+  const prevBtn = document.getElementById('coachPrev');
+  const nextBtn = document.getElementById('coachNext');
+  prevBtn.classList.toggle('invisible', index === 0);
+  nextBtn.textContent = step.isLast ? '🎉 Finish' : 'Next →';
+
+  arrow.classList.add('hidden');
+
+  // ── Center mode (no target) ───────────────────────────────────────────────
+  if (!step.target) {
+    overlay.style.background = 'rgba(0,0,0,0.80)';
+    spotlight.classList.add('hidden');
+    card.style.position = 'fixed';
+    card.style.top  = '50%';
+    card.style.left = '50%';
+    card.style.transform = 'translate(-50%, -50%)';
+    return;
+  }
+
+  // ── Spotlight mode ────────────────────────────────────────────────────────
+  overlay.style.background = 'transparent';
+  overlay.style.pointerEvents = 'none'; // let spotlight div intercept
+  card.style.transform = '';
+
+  const targetEl = document.querySelector(step.target);
+  if (!targetEl) {
+    // Target not in DOM (e.g. empty lists) — skip gracefully
+    nextCoachStep();
+    return;
+  }
+
+  // Scroll target into view smoothly
+  targetEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+  const PAD = 8;
+  const CARD_W = 340;
+  const CARD_H = card.offsetHeight || 240;
+  const GAP    = 14;
+
+  const r  = targetEl.getBoundingClientRect();
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+
+  // Position spotlight
+  spotlight.classList.remove('hidden');
+  spotlight.style.top    = `${r.top    - PAD}px`;
+  spotlight.style.left   = `${r.left   - PAD}px`;
+  spotlight.style.width  = `${r.width  + PAD * 2}px`;
+  spotlight.style.height = `${r.height + PAD * 2}px`;
+  spotlight.style.pointerEvents = 'none';
+
+  // Position card
+  const pl = step.placement || 'bottom';
+  let top, left;
+
+  if (pl === 'bottom') {
+    top  = r.bottom + PAD + GAP;
+    left = r.left + r.width / 2 - CARD_W / 2;
+  } else if (pl === 'top') {
+    top  = r.top - PAD - CARD_H - GAP;
+    left = r.left + r.width / 2 - CARD_W / 2;
+  } else if (pl === 'right') {
+    top  = r.top + r.height / 2 - CARD_H / 2;
+    left = r.right + PAD + GAP;
+  } else {
+    top  = r.top + r.height / 2 - CARD_H / 2;
+    left = r.left - PAD - CARD_W - GAP;
+  }
+
+  // Clamp to viewport with margin
+  const M = 12;
+  left = Math.max(M, Math.min(left, vw - CARD_W - M));
+  top  = Math.max(M, Math.min(top,  vh - CARD_H - M));
+
+  card.style.position = 'fixed';
+  card.style.top  = `${top}px`;
+  card.style.left = `${left}px`;
+
+  // Re-enable pointer events on the overlay (clicks on dark area are swallowed)
+  overlay.style.pointerEvents = 'auto';
+  card.style.pointerEvents = 'auto';
+  spotlight.style.pointerEvents = 'none';
+}
+
+// ── Auto-start for first-time users ──────────────────────────────────────────
+// Called from checkSession() after a successful login
+function _maybeStartOnboarding() {
+  if (!localStorage.getItem(_ONBOARDING_KEY)) {
+    setTimeout(startOnboarding, 600);
+  }
+}
+
+// Close coach marks with Escape
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !document.getElementById('coachOverlay').classList.contains('hidden')) {
+    skipOnboarding();
+  }
+});
