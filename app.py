@@ -176,6 +176,7 @@ EXCHANGE_MAP = {
     'ADX': {'suffix': '.AD', 'currency': 'AED'},
     'NASDAQ Dubai': {'suffix': '.DI', 'currency': 'USD'},
 }
+ALLOWED_CURRENCIES = {'AED', 'INR', 'USD'}
 
 # Reusable full-account SELECT (includes loan + share details)
 _ACCOUNT_SELECT = """
@@ -183,7 +184,9 @@ _ACCOUNT_SELECT = """
            u.name AS user_name,
            ld.interest_rate, ld.remaining_tenure, ld.monthly_emi, ld.remaining_principal,
            sd.stock_name, sd.exchange, sd.stock_code, sd.quantity,
-           sd.last_price, sd.last_price_currency, sd.last_fetched
+           sd.purchase_price, sd.purchase_price_currency,
+           sd.last_price, sd.last_price_currency, sd.last_fetched,
+           (SELECT be.amount FROM balance_entries be WHERE be.account_id = a.id ORDER BY be.id DESC LIMIT 1) AS latest_balance
     FROM accounts a
     JOIN users u ON u.id = a.user_id
     LEFT JOIN loan_details ld ON ld.account_id = a.id
@@ -222,6 +225,327 @@ def _period_label(value, interval):
     return dt.strftime('%Y-%m')
 
 
+def _share_native_currency(exchange, fallback='USD'):
+    return EXCHANGE_MAP.get((exchange or '').strip(), {}).get('currency', fallback)
+
+
+def _share_exchange_currency_case_sql(column='exchange'):
+    clauses = [
+        f"WHEN '{exchange}' THEN '{meta['currency']}'"
+        for exchange, meta in EXCHANGE_MAP.items()
+    ]
+    return f"CASE {column} {' '.join(clauses)} ELSE 'USD' END"
+
+
+def _normalize_currency(value, field_name='currency', required=False, default='USD'):
+    currency = str(value or '').upper().strip()
+    if not currency:
+        if required:
+            raise ValueError(f'{field_name} is required')
+        return default
+    if currency not in ALLOWED_CURRENCIES:
+        raise ValueError(f'{field_name} must be one of {", ".join(sorted(ALLOWED_CURRENCIES))}')
+    return currency
+
+
+def _coerce_non_negative_number(value, field_name, required=False, default=0.0):
+    if value in (None, ''):
+        if required:
+            raise ValueError(f'{field_name} is required')
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f'{field_name} must be a number')
+    if number < 0:
+        raise ValueError(f'{field_name} cannot be negative')
+    return number
+
+
+def _coerce_share_payload(data, existing=None, partial=False):
+    existing = dict(existing or {})
+    payload = {
+        'stock_name': str(
+            data.get('stock_name', existing.get('stock_name') if partial else '') or ''
+        ).strip(),
+        'exchange': str(
+            data.get('exchange', existing.get('exchange') if partial else '') or ''
+        ).strip(),
+        'stock_code': str(
+            data.get('stock_code', existing.get('stock_code') if partial else '') or ''
+        ).upper().strip(),
+        'quantity': _coerce_non_negative_number(
+            data.get('quantity', existing.get('quantity') if partial else 0),
+            'quantity',
+            default=0.0,
+        ),
+        'purchase_price': _coerce_non_negative_number(
+            data.get('purchase_price', existing.get('purchase_price') if partial else None),
+            'purchase_price',
+            required=True,
+        ),
+        'purchase_price_currency': _normalize_currency(
+            data.get(
+                'purchase_price_currency',
+                existing.get('purchase_price_currency') if partial else None,
+            ),
+            field_name='purchase_price_currency',
+            required=True,
+        ),
+    }
+    payload['purchase_price_currency'] = _share_native_currency(
+        payload['exchange'],
+        fallback=payload['purchase_price_currency'],
+    )
+    return payload
+
+
+def _currency_to_usd(amount, currency, rates=None):
+    if amount is None:
+        return None
+    current_rates = rates or _fetch_usd_rates()
+    normalized = _normalize_currency(currency, default='USD')
+    rate = current_rates.get(normalized, 1.0) or 1.0
+    return float(amount) / rate
+
+
+def _convert_currency_amount(amount, from_currency, to_currency, rates=None):
+    if amount is None:
+        return None
+    normalized_to = _normalize_currency(to_currency, default='USD')
+    usd_value = _currency_to_usd(amount, from_currency, rates=rates)
+    if normalized_to == 'USD':
+        return usd_value
+    current_rates = rates or _fetch_usd_rates()
+    return usd_value * (current_rates.get(normalized_to, 1.0) or 1.0)
+
+
+def _account_currency(account_row, fallback='USD'):
+    return _normalize_currency(
+        account_row['currency'] if account_row and 'currency' in account_row.keys() else fallback,
+        default=fallback,
+    )
+
+
+def _serialize_balance_row(row, rates=None):
+    data = dict(row)
+    account_currency = _normalize_currency(data.get('account_currency') or data.get('currency'), default='USD')
+    native_amount = data.get('amount')
+    data['amount_native'] = native_amount
+    data['amount_currency'] = account_currency
+    if native_amount is not None:
+        data['amount_usd'] = _currency_to_usd(native_amount, account_currency, rates=rates)
+    else:
+        data['amount_usd'] = None
+    return data
+
+
+def _serialize_balance_rows(rows):
+    rows = list(rows)
+    needs_rates = any(row['amount'] is not None for row in rows)
+    rates = _fetch_usd_rates() if needs_rates else None
+    return [_serialize_balance_row(row, rates=rates) for row in rows]
+
+
+def _serialize_transaction_row(row, rates=None):
+    data = dict(row)
+    if data.get('source_amount') is not None and data.get('source_currency'):
+        data['source_amount_usd'] = _currency_to_usd(data['source_amount'], data['source_currency'], rates=rates)
+    else:
+        data['source_amount_usd'] = None
+    if data.get('destination_amount') is not None and data.get('destination_currency'):
+        data['destination_amount_usd'] = _currency_to_usd(
+            data['destination_amount'],
+            data['destination_currency'],
+            rates=rates,
+        )
+    else:
+        data['destination_amount_usd'] = None
+    return data
+
+
+def _serialize_transaction_rows(rows):
+    rows = list(rows)
+    needs_rates = any(
+        (row['source_amount'] is not None and row['source_currency'])
+        or (row['destination_amount'] is not None and row['destination_currency'])
+        for row in rows
+    )
+    rates = _fetch_usd_rates() if needs_rates else None
+    return [_serialize_transaction_row(row, rates=rates) for row in rows]
+
+
+def _convert_account_currency_storage(db, account_id, old_currency, new_currency, account_type=None, rates=None,
+                                      skip_loan_details=False):
+    normalized_old = _normalize_currency(old_currency, default='USD')
+    normalized_new = _normalize_currency(new_currency, default='USD')
+    if normalized_old == normalized_new:
+        return
+
+    current_rates = rates or _fetch_usd_rates()
+
+    balance_rows = db.execute(
+        "SELECT id, amount FROM balance_entries WHERE account_id=?",
+        (account_id,)
+    ).fetchall()
+    for row in balance_rows:
+        converted = _convert_currency_amount(row['amount'], normalized_old, normalized_new, rates=current_rates)
+        db.execute("UPDATE balance_entries SET amount=? WHERE id=?", (converted, row['id']))
+
+    if account_type == 'loan' and not skip_loan_details:
+        loan = db.execute("""
+            SELECT monthly_emi, remaining_principal
+            FROM loan_details
+            WHERE account_id=?
+        """, (account_id,)).fetchone()
+        if loan:
+            db.execute("""
+                UPDATE loan_details
+                SET monthly_emi=?, remaining_principal=?
+                WHERE account_id=?
+            """, (
+                _convert_currency_amount(loan['monthly_emi'], normalized_old, normalized_new, rates=current_rates),
+                _convert_currency_amount(loan['remaining_principal'], normalized_old, normalized_new, rates=current_rates),
+                account_id,
+            ))
+
+
+def _revalue_share_from_cached_price(db, account_id, recorded_at=None):
+    share = db.execute("""
+        SELECT quantity, last_price, last_price_currency
+        FROM share_details
+        WHERE account_id=?
+    """, (account_id,)).fetchone()
+    account = db.execute("SELECT currency FROM accounts WHERE id=?", (account_id,)).fetchone()
+    if not share or share['last_price'] is None or not account:
+        return None
+
+    native_currency = _account_currency(account)
+    valuation = _convert_currency_amount(
+        float(share['last_price']) * float(share['quantity'] or 0),
+        _normalize_currency(share['last_price_currency'], default=native_currency),
+        native_currency,
+    )
+    note = (
+        f'Cached price valuation @ {_normalize_currency(share["last_price_currency"], default=native_currency)} '
+        f'{float(share["last_price"]):,.4f} × {float(share["quantity"] or 0):g}'
+    )
+    if recorded_at:
+        db.execute(
+            "INSERT INTO balance_entries (account_id, amount, note, recorded_at) VALUES (?,?,?,?)",
+            (account_id, valuation, note, recorded_at)
+        )
+    else:
+        db.execute(
+            "INSERT INTO balance_entries (account_id, amount, note) VALUES (?,?,?)",
+            (account_id, valuation, note)
+        )
+    return {
+        'price': float(share['last_price']),
+        'currency': native_currency,
+        'value_native': valuation,
+        'value_usd': _currency_to_usd(valuation, native_currency),
+        'source': 'cached',
+    }
+
+
+def _serialize_account_row(row, rates=None):
+    data = dict(row)
+    data['cost_basis_total'] = None
+    data['cost_basis_total_usd'] = None
+    data['unrealized_gain_loss'] = None
+    data['unrealized_gain_loss_usd'] = None
+    data['unrealized_gain_loss_pct'] = None
+    data['is_profitable'] = None
+    account_currency = _normalize_currency(data.get('currency'), default='USD')
+    data['currency'] = account_currency
+
+    if data.get('latest_balance') is not None:
+        data['latest_balance_native'] = data['latest_balance']
+        data['latest_balance_currency'] = account_currency
+        data['latest_balance_usd'] = _currency_to_usd(data['latest_balance'], account_currency, rates=rates)
+    else:
+        data['latest_balance_native'] = None
+        data['latest_balance_currency'] = account_currency
+        data['latest_balance_usd'] = None
+
+    for field in ('monthly_emi', 'remaining_principal'):
+        native_value = data.get(field)
+        native_key = f'{field}_native'
+        currency_key = f'{field}_currency'
+        usd_key = f'{field}_usd'
+        data[native_key] = native_value
+        data[currency_key] = account_currency
+        if native_value is not None:
+            data[usd_key] = _currency_to_usd(native_value, account_currency, rates=rates)
+        else:
+            data[usd_key] = None
+
+    if data.get('type') != 'shares':
+        return data
+
+    purchase_price = data.get('purchase_price')
+    quantity = float(data.get('quantity') or 0)
+    purchase_currency = _normalize_currency(
+        data.get('purchase_price_currency'),
+        default=_share_native_currency(data.get('exchange')),
+    )
+    data['purchase_price_currency'] = purchase_currency
+
+    if purchase_price is None:
+        return data
+
+    cost_basis_total = _convert_currency_amount(
+        float(purchase_price) * quantity,
+        purchase_currency,
+        account_currency,
+        rates=rates,
+    )
+    data['cost_basis_total'] = cost_basis_total
+    data['cost_basis_total_usd'] = _currency_to_usd(cost_basis_total, account_currency, rates=rates)
+
+    current_value = data.get('latest_balance')
+    if current_value is None and data.get('last_price') is not None:
+        market_currency = _normalize_currency(
+            data.get('last_price_currency'),
+            default=_share_native_currency(data.get('exchange')),
+        )
+        current_value = _convert_currency_amount(
+            float(data['last_price']) * quantity,
+            market_currency,
+            account_currency,
+            rates=rates,
+        )
+
+    if current_value is None:
+        return data
+
+    gain = float(current_value) - cost_basis_total
+    data['unrealized_gain_loss'] = gain
+    data['unrealized_gain_loss_usd'] = _currency_to_usd(gain, account_currency, rates=rates)
+    if cost_basis_total:
+        data['unrealized_gain_loss_pct'] = (gain / cost_basis_total) * 100
+    data['is_profitable'] = gain > 0
+    return data
+
+
+def _serialize_account_rows(rows):
+    rows = list(rows)
+    needs_rates = any(
+        row['latest_balance'] is not None
+        or row['monthly_emi'] is not None
+        or row['remaining_principal'] is not None
+        or (
+            row['type'] == 'shares' and (
+                row['purchase_price'] is not None or row['last_price'] is not None
+            )
+        )
+        for row in rows
+    )
+    rates = _fetch_usd_rates() if needs_rates else None
+    return [_serialize_account_row(row, rates=rates) for row in rows]
+
+
 def _normalize_email(value):
     return (value or '').strip().lower()
 
@@ -249,6 +573,9 @@ def get_db():
             g.db = sqlite3.connect(DB_PATH)
             g.db.row_factory = sqlite3.Row
             g.db.execute("PRAGMA foreign_keys = ON")
+            g.db.execute("PRAGMA journal_mode = WAL")
+            g.db.execute("PRAGMA cache_size = -16000")   # 16 MB page cache
+            g.db.execute("PRAGMA temp_store = MEMORY")
     return g.db
 
 
@@ -283,6 +610,55 @@ def init_db():
 def migrate_db():
     """Idempotent migrations for existing databases."""
     if DB_BACKEND == 'postgres':
+        conn = _connect_postgres()
+        try:
+            conn.execute("""
+                ALTER TABLE share_details
+                ADD COLUMN IF NOT EXISTS purchase_price DOUBLE PRECISION NOT NULL DEFAULT 0
+            """)
+            conn.execute("""
+                ALTER TABLE share_details
+                ADD COLUMN IF NOT EXISTS purchase_price_currency TEXT NOT NULL DEFAULT 'USD'
+            """)
+            conn.execute(f"""
+                UPDATE share_details
+                SET purchase_price = COALESCE(last_price, 0)
+                WHERE purchase_price IS NULL
+                   OR (purchase_price = 0 AND last_price IS NOT NULL)
+            """)
+            conn.execute(f"""
+                UPDATE share_details
+                SET purchase_price_currency = COALESCE(
+                    NULLIF(BTRIM(purchase_price_currency), ''),
+                    NULLIF(BTRIM(last_price_currency), ''),
+                    {_share_exchange_currency_case_sql('exchange')}
+                )
+                WHERE purchase_price_currency IS NULL
+                   OR BTRIM(purchase_price_currency) = ''
+            """)
+            conn.execute("""
+                ALTER TABLE transactions
+                ADD COLUMN IF NOT EXISTS source_amount DOUBLE PRECISION
+            """)
+            conn.execute("""
+                ALTER TABLE transactions
+                ADD COLUMN IF NOT EXISTS source_currency TEXT
+            """)
+            conn.execute("""
+                ALTER TABLE transactions
+                ADD COLUMN IF NOT EXISTS destination_amount DOUBLE PRECISION
+            """)
+            conn.execute("""
+                ALTER TABLE transactions
+                ADD COLUMN IF NOT EXISTS destination_currency TEXT
+            """)
+            conn.execute("""
+                ALTER TABLE transactions
+                ADD COLUMN IF NOT EXISTS fx_rate DOUBLE PRECISION
+            """)
+            conn.commit()
+        finally:
+            conn.close()
         return
 
     _ensure_parent_dir(DB_PATH)
@@ -398,10 +774,39 @@ def migrate_db():
                 exchange            TEXT,
                 stock_code          TEXT,
                 quantity            REAL NOT NULL DEFAULT 0,
+                purchase_price      REAL NOT NULL DEFAULT 0,
+                purchase_price_currency TEXT NOT NULL DEFAULT 'USD',
                 last_price          REAL,
                 last_price_currency TEXT,
                 last_fetched        TEXT
             )
+        """)
+        share_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(share_details)").fetchall()
+        }
+        if 'purchase_price' not in share_cols:
+            conn.execute(
+                "ALTER TABLE share_details ADD COLUMN purchase_price REAL NOT NULL DEFAULT 0"
+            )
+        if 'purchase_price_currency' not in share_cols:
+            conn.execute(
+                "ALTER TABLE share_details ADD COLUMN purchase_price_currency TEXT NOT NULL DEFAULT 'USD'"
+            )
+        conn.execute(f"""
+            UPDATE share_details
+            SET purchase_price = COALESCE(last_price, 0)
+            WHERE purchase_price IS NULL
+               OR (purchase_price = 0 AND last_price IS NOT NULL)
+        """)
+        conn.execute(f"""
+            UPDATE share_details
+            SET purchase_price_currency = COALESCE(
+                NULLIF(TRIM(purchase_price_currency), ''),
+                NULLIF(TRIM(last_price_currency), ''),
+                {_share_exchange_currency_case_sql('exchange')}
+            )
+            WHERE purchase_price_currency IS NULL
+               OR TRIM(purchase_price_currency) = ''
         """)
 
         # Migration 3: add accounts.user_id and assign legacy data to a primary owner.
@@ -600,6 +1005,11 @@ def migrate_db():
                 user_id         INTEGER NOT NULL REFERENCES users(id),
                 txn_type        TEXT    NOT NULL CHECK(txn_type IN ('credit','debit','intra')),
                 amount          REAL    NOT NULL CHECK(amount > 0),
+                source_amount   REAL,
+                source_currency TEXT,
+                destination_amount REAL,
+                destination_currency TEXT,
+                fx_rate         REAL,
                 from_account_id INTEGER REFERENCES accounts(id),
                 to_account_id   INTEGER REFERENCES accounts(id),
                 counterparty    TEXT,
@@ -608,6 +1018,19 @@ def migrate_db():
                 created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
             )
         """)
+        txn_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()
+        }
+        if 'source_amount' not in txn_cols:
+            conn.execute("ALTER TABLE transactions ADD COLUMN source_amount REAL")
+        if 'source_currency' not in txn_cols:
+            conn.execute("ALTER TABLE transactions ADD COLUMN source_currency TEXT")
+        if 'destination_amount' not in txn_cols:
+            conn.execute("ALTER TABLE transactions ADD COLUMN destination_amount REAL")
+        if 'destination_currency' not in txn_cols:
+            conn.execute("ALTER TABLE transactions ADD COLUMN destination_currency TEXT")
+        if 'fx_rate' not in txn_cols:
+            conn.execute("ALTER TABLE transactions ADD COLUMN fx_rate REAL")
         be_cols = {
             row[1] for row in conn.execute("PRAGMA table_info(balance_entries)").fetchall()
         }
@@ -616,6 +1039,43 @@ def migrate_db():
                 "ALTER TABLE balance_entries ADD COLUMN transaction_id INTEGER "
                 "REFERENCES transactions(id) ON DELETE SET NULL"
             )
+
+        # Migration 6: default_currency preference on users
+        user_cols = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if 'default_currency' not in user_cols:
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN default_currency TEXT NOT NULL DEFAULT 'AED'"
+            )
+
+        # Migration 7: performance indexes
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_be_account_id
+            ON balance_entries (account_id, id DESC)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_be_account_recorded_at
+            ON balance_entries (account_id, recorded_at DESC)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_accounts_user_active
+            ON accounts (user_id, is_active)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_bucket_alloc_entry
+            ON bucket_allocations (balance_entry_id)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_bucket_alloc_bucket
+            ON bucket_allocations (bucket_id)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_users_family
+            ON users (family_id)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_transactions_user
+            ON transactions (user_id, recorded_at DESC)
+        """)
 
         conn.commit()
 
@@ -707,7 +1167,7 @@ def _ensure_family_exists(db, family_id):
 
 
 def _owned_account(db, account_id, include_inactive=False):
-    query = "SELECT id, user_id, type, is_active FROM accounts WHERE id=? AND user_id=?"
+    query = "SELECT id, user_id, name, type, institution, currency, is_active FROM accounts WHERE id=? AND user_id=?"
     params = [account_id, current_finance_user_id()]
     if not include_inactive:
         query += " AND is_active=1"
@@ -768,6 +1228,10 @@ def _session_payload(db, auth=None):
         "SELECT COUNT(*) AS c FROM users WHERE family_id=?",
         (auth['family_id'],)
     ).fetchone()['c']
+    user_row = db.execute(
+        "SELECT default_currency FROM users WHERE id=?", (auth['user_id'],)
+    ).fetchone()
+    default_currency = (user_row['default_currency'] if user_row else None) or 'AED'
     return {
         'ok': True,
         'logged_in': True,
@@ -778,6 +1242,7 @@ def _session_payload(db, auth=None):
             'family_id': auth['family_id'],
             'family_name': auth['family_name'],
             'family_member_count': family_count,
+            'default_currency': default_currency,
         },
         'available_scopes': ['me', 'all'],
     }
@@ -962,14 +1427,27 @@ def _make_family_name(base_name):
 
 # Stock-price helpers
 
+# Rate cache: (rates_dict, fetched_date_str)  — refreshed once per calendar day
+_rates_cache: tuple = (None, None)
+
 def _fetch_usd_rates():
+    global _rates_cache
+    cached_rates, cached_date = _rates_cache
+    today = datetime.utcnow().strftime('%Y-%m-%d')
+    if cached_rates and cached_date == today:
+        return cached_rates
     try:
         url = 'https://open.er-api.com/v6/latest/USD'
         with urllib.request.urlopen(url, timeout=5) as resp:
             data = _json.loads(resp.read())
-        return {'AED': data['rates']['AED'], 'INR': data['rates']['INR'], 'USD': 1.0}
+        rates = {'AED': data['rates']['AED'], 'INR': data['rates']['INR'], 'USD': 1.0}
+        _rates_cache = (rates, today)
+        return rates
     except Exception:
-        return {'AED': 3.6725, 'INR': 83.5, 'USD': 1.0}
+        fallback = {'AED': 3.6725, 'INR': 83.5, 'USD': 1.0}
+        # Cache fallback too so we don't hammer the API on repeated failures
+        _rates_cache = (fallback, today)
+        return fallback
 
 
 def _fetch_stock_price(exchange, stock_code):
@@ -1127,9 +1605,10 @@ def _auto_price_and_entry(db, account_id):
 
     price, currency, ticker = _fetch_stock_price(sd['exchange'], sd['stock_code'])
     qty = sd['quantity'] or 0
-    rates = _fetch_usd_rates()
-    rate = rates.get(currency, 1.0) or 1.0
-    value_usd = (price * qty) / rate
+    account = db.execute("SELECT currency FROM accounts WHERE id=?", (account_id,)).fetchone()
+    native_currency = _account_currency(account or {'currency': currency}, fallback=currency)
+    value_native = _convert_currency_amount(price * qty, currency, native_currency)
+    value_usd = _currency_to_usd(value_native, native_currency)
 
     db.execute("""
         UPDATE share_details
@@ -1139,9 +1618,16 @@ def _auto_price_and_entry(db, account_id):
 
     db.execute(
         "INSERT INTO balance_entries (account_id, amount, note) VALUES (?,?,?)",
-        (account_id, value_usd, f'Auto: {ticker} @ {currency} {price:,.4f} × {qty}')
+        (account_id, value_native, f'Auto: {ticker} @ {currency} {price:,.4f} × {qty}')
     )
-    return {'price': price, 'currency': currency, 'value_usd': value_usd, 'ticker': ticker}
+    return {
+        'price': price,
+        'currency': currency,
+        'account_currency': native_currency,
+        'value_native': value_native,
+        'value_usd': value_usd,
+        'ticker': ticker,
+    }
 
 
 def _normalize_bucket_allocation_type(value):
@@ -1164,10 +1650,11 @@ def _latest_bank_entries(db, user_id=None, family_id=None):
     params = []
     _append_owner_filter(where, params, alias='a', user_id=user_id, family_id=family_id)
 
-    return db.execute(f"""
+    rows = db.execute(f"""
         SELECT be.id AS balance_entry_id,
                be.account_id,
                a.name AS account_name,
+               a.currency AS account_currency,
                be.amount,
                COALESCE(SUM(ba.amount), 0) AS total_allocated,
                COALESCE(SUM(CASE WHEN b.allocation_type = 'manual' THEN ba.amount ELSE 0 END), 0) AS manual_allocated
@@ -1176,9 +1663,15 @@ def _latest_bank_entries(db, user_id=None, family_id=None):
         LEFT JOIN bucket_allocations ba ON ba.balance_entry_id = be.id
         LEFT JOIN buckets b ON b.id = ba.bucket_id
         WHERE {" AND ".join(where)}
-        GROUP BY be.id, be.account_id, a.name, be.amount
-        ORDER BY be.amount DESC, a.name
+        GROUP BY be.id, be.account_id, a.name, a.currency, be.amount
     """, params).fetchall()
+    rates = _fetch_usd_rates()
+    result = []
+    for row in rows:
+        item = dict(row)
+        item['amount_usd'] = _currency_to_usd(item['amount'], item['account_currency'], rates=rates)
+        result.append(item)
+    return sorted(result, key=lambda item: (-item['amount_usd'], item['account_name'].lower()))
 
 
 def _has_auto_buckets(db, user_id):
@@ -1198,7 +1691,7 @@ def _latest_manual_allocations_for_account(db, account_id):
             SELECT id
             FROM balance_entries
             WHERE account_id = ?
-            ORDER BY recorded_at DESC LIMIT 1
+            ORDER BY id DESC LIMIT 1
         )
           AND b.allocation_type = 'manual'
     """, (account_id,)).fetchall()
@@ -1209,35 +1702,36 @@ def _latest_manual_allocations_for_account(db, account_id):
     }
 
 
-def _cash_position_summary(db, user_id=None, family_id=None):
+def _cash_position_summary(db, user_id=None, family_id=None, rates=None):
+    rates = rates or _fetch_usd_rates()
+    latest_banks = _latest_bank_entries(db, user_id=user_id, family_id=family_id)
+    bank_cash_total = sum(
+        _currency_to_usd(row['amount'], row['account_currency'], rates=rates)
+        for row in latest_banks
+    )
+    allocated_total = sum(float(row['total_allocated'] or 0) for row in latest_banks)
+
     params = []
     where = [
         "a.is_active = 1",
-        "a.type IN ('bank', 'loan')",
+        "a.type = 'loan'",
         """be.id = (
               SELECT id FROM balance_entries b2
               WHERE b2.account_id = be.account_id
-              ORDER BY recorded_at DESC LIMIT 1
+              ORDER BY id DESC LIMIT 1
           )""",
     ]
     _append_owner_filter(where, params, alias='a', user_id=user_id, family_id=family_id)
-
-    row = db.execute(f"""
-        SELECT COALESCE(SUM(CASE WHEN a.type = 'bank' THEN be.amount ELSE 0 END), 0) AS bank_cash_total,
-               COALESCE(SUM(CASE WHEN a.type = 'loan' THEN ABS(be.amount) ELSE 0 END), 0) AS loan_total,
-               COALESCE(SUM(CASE WHEN a.type = 'bank' THEN ba_sum.allocated_total ELSE 0 END), 0) AS allocated_total
+    loan_rows = db.execute(f"""
+        SELECT be.amount, a.currency
         FROM balance_entries be
         JOIN accounts a ON a.id = be.account_id
-        LEFT JOIN (
-            SELECT balance_entry_id, SUM(amount) AS allocated_total
-            FROM bucket_allocations
-            GROUP BY balance_entry_id
-        ) ba_sum ON ba_sum.balance_entry_id = be.id
         WHERE {" AND ".join(where)}
-    """, params).fetchone()
-    bank_cash_total = float(row['bank_cash_total'] or 0)
-    loan_total = float(row['loan_total'] or 0)
-    allocated_total = float(row['allocated_total'] or 0)
+    """, params).fetchall()
+    loan_total = sum(
+        abs(_currency_to_usd(row['amount'], row['currency'], rates=rates))
+        for row in loan_rows
+    )
     return {
         'bank_cash_total': bank_cash_total,
         'loan_total': loan_total,
@@ -1288,7 +1782,7 @@ def _allocate_manual_bucket(db, bucket_id, amount):
         if remaining <= 1e-9:
             break
 
-        available = max(0.0, float(entry['amount'] or 0) - float(entry['total_allocated'] or 0))
+        available = max(0.0, float(entry['amount_usd'] or 0) - float(entry['total_allocated'] or 0))
         if available <= 1e-9:
             continue
 
@@ -1359,12 +1853,12 @@ def _auto_allocate_buckets(db, user_id):
         )
 
     manual_total = sum(float(entry['manual_allocated'] or 0) for entry in latest_entries)
-    bank_cash_total = sum(float(entry['amount'] or 0) for entry in latest_entries)
+    bank_cash_total = sum(float(entry['amount_usd'] or 0) for entry in latest_entries)
     total_available = max(0.0, bank_cash_total - manual_total)
 
     entries = []
     for entry in latest_entries:
-        available = max(0.0, float(entry['amount'] or 0) - float(entry['manual_allocated'] or 0))
+        available = max(0.0, float(entry['amount_usd'] or 0) - float(entry['manual_allocated'] or 0))
         entries.append({
             'balance_entry_id': entry['balance_entry_id'],
             'account_id': entry['account_id'],
@@ -1416,7 +1910,10 @@ def _auto_allocate_buckets(db, user_id):
 
     return {
         'auto_bucket_count': len(allocatable_buckets),
-        'accounts_used': sum(1 for entry in latest_entries if float(entry['amount'] or 0) > 0),
+        'accounts_used': sum(
+            1 for entry in latest_entries
+            if float(entry['amount_usd'] or 0) > 0
+        ),
         'bank_cash_total': bank_cash_total,
         'manual_allocated_total': manual_total,
         'auto_allocated_total': total_allocated,
@@ -1443,16 +1940,17 @@ def _create_txn_balance_entry(db, account_id, amount, txn_id, note, recorded_at=
     _latest_manual_allocations_for_account does not accidentally pick up the
     newly-created (empty) entry instead of the old one.
     """
-    acc_row = db.execute("SELECT type FROM accounts WHERE id=?", (account_id,)).fetchone()
+    acc_row = db.execute("SELECT type, currency FROM accounts WHERE id=?", (account_id,)).fetchone()
 
     # Capture previous manual allocations before the new entry exists in the DB
     prev_allocs = {}
     if acc_row and acc_row['type'] == 'bank' and amount >= 0:
         prev_allocs = _latest_manual_allocations_for_account(db, account_id)
         total_alloc = sum(prev_allocs.values())
-        if total_alloc > amount + 1e-9:
+        current_amount_usd = _currency_to_usd(amount, acc_row['currency'])
+        if total_alloc > current_amount_usd + 1e-9:
             # Scale proportionally so allocations never exceed the new balance
-            factor = amount / total_alloc if total_alloc > 0 else 0
+            factor = current_amount_usd / total_alloc if total_alloc > 0 else 0
             prev_allocs = {k: v * factor for k, v in prev_allocs.items()}
 
     if recorded_at:
@@ -1479,12 +1977,14 @@ def _create_txn_balance_entry(db, account_id, amount, txn_id, note, recorded_at=
 
 def _execute_transaction(db, user_id, txn_type, amount,
                          from_account_id=None, to_account_id=None,
-                         counterparty=None, note=None, recorded_at=None):
+                         counterparty=None, note=None, recorded_at=None,
+                         fx_rate=None):
     """Execute a financial transaction and create corresponding balance entries.
 
-    credit: external money in → to_account balance increases
-    debit:  money out → from_account balance decreases (blocked if amount > balance)
-    intra:  transfer → from_account decreases, to_account increases
+    credit: external money in → to_account balance increases in destination native currency
+    debit:  money out → from_account balance decreases in source native currency
+    intra:  transfer → from_account decreases in source native currency,
+            to_account increases in destination native currency via fx_rate
     """
     if txn_type not in ('credit', 'debit', 'intra'):
         raise ValueError('Transaction type must be credit, debit, or intra')
@@ -1492,24 +1992,34 @@ def _execute_transaction(db, user_id, txn_type, amount,
         raise ValueError('Transaction amount must be greater than zero')
 
     now = _dt_str(_utc_now())
+    amount = float(amount)
+    txn_amount_usd = None
+    source_amount = None
+    source_currency = None
+    destination_amount = None
+    destination_currency = None
+    normalized_fx_rate = None
 
     if txn_type == 'credit':
         if not to_account_id:
             raise ValueError('Credit transaction requires a destination account')
         acc = db.execute(
-            "SELECT id, type FROM accounts WHERE id=? AND user_id=? AND is_active=1",
+            "SELECT id, type, currency FROM accounts WHERE id=? AND user_id=? AND is_active=1",
             (to_account_id, user_id)
         ).fetchone()
         if not acc:
             raise ValueError('Destination account not found')
         old_balance = _get_latest_balance(db, to_account_id)
         new_balance = old_balance + amount
+        destination_amount = amount
+        destination_currency = _account_currency(acc)
+        txn_amount_usd = _currency_to_usd(destination_amount, destination_currency)
 
     elif txn_type == 'debit':
         if not from_account_id:
             raise ValueError('Debit transaction requires a source account')
         acc = db.execute(
-            "SELECT id, type FROM accounts WHERE id=? AND user_id=? AND is_active=1",
+            "SELECT id, type, currency FROM accounts WHERE id=? AND user_id=? AND is_active=1",
             (from_account_id, user_id)
         ).fetchone()
         if not acc:
@@ -1518,9 +2028,12 @@ def _execute_transaction(db, user_id, txn_type, amount,
         if amount - old_balance > 1e-9:
             raise ValueError(
                 f'Insufficient balance. Current balance is '
-                f'{old_balance:.2f} USD; tried to debit {amount:.2f} USD.'
+                f'{old_balance:.2f} {acc["currency"]}; tried to debit {amount:.2f} {acc["currency"]}.'
             )
         new_balance = old_balance - amount
+        source_amount = amount
+        source_currency = _account_currency(acc)
+        txn_amount_usd = _currency_to_usd(source_amount, source_currency)
 
     else:  # intra
         if not from_account_id:
@@ -1530,13 +2043,13 @@ def _execute_transaction(db, user_id, txn_type, amount,
         if from_account_id == to_account_id:
             raise ValueError('Source and destination accounts must be different')
         from_acc = db.execute(
-            "SELECT id, type, name FROM accounts WHERE id=? AND user_id=? AND is_active=1",
+            "SELECT id, type, name, currency FROM accounts WHERE id=? AND user_id=? AND is_active=1",
             (from_account_id, user_id)
         ).fetchone()
         if not from_acc:
             raise ValueError('Source account not found')
         to_acc = db.execute(
-            "SELECT id, type, name FROM accounts WHERE id=? AND user_id=? AND is_active=1",
+            "SELECT id, type, name, currency FROM accounts WHERE id=? AND user_id=? AND is_active=1",
             (to_account_id, user_id)
         ).fetchone()
         if not to_acc:
@@ -1545,17 +2058,35 @@ def _execute_transaction(db, user_id, txn_type, amount,
         if amount - old_from > 1e-9:
             raise ValueError(
                 f'Insufficient balance. Current balance is '
-                f'{old_from:.2f} USD; tried to transfer {amount:.2f} USD.'
+                f'{old_from:.2f} {from_acc["currency"]}; tried to transfer {amount:.2f} {from_acc["currency"]}.'
             )
         old_to = _get_latest_balance(db, to_account_id)
+        source_amount = amount
+        source_currency = _account_currency(from_acc)
+        destination_currency = _account_currency(to_acc)
+        if source_currency == destination_currency:
+            normalized_fx_rate = 1.0
+            destination_amount = source_amount
+        else:
+            try:
+                normalized_fx_rate = float(fx_rate or 0)
+            except (TypeError, ValueError):
+                raise ValueError('FX rate must be a number')
+            if normalized_fx_rate <= 0:
+                raise ValueError('FX rate must be greater than zero')
+            destination_amount = source_amount * normalized_fx_rate
+        txn_amount_usd = _currency_to_usd(source_amount, source_currency)
 
     cur = db.execute("""
         INSERT INTO transactions
-            (user_id, txn_type, amount, from_account_id, to_account_id,
-             counterparty, note, recorded_at, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?)
+            (user_id, txn_type, amount, source_amount, source_currency,
+             destination_amount, destination_currency, fx_rate,
+             from_account_id, to_account_id, counterparty, note, recorded_at, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
-        user_id, txn_type, amount,
+        user_id, txn_type, txn_amount_usd,
+        source_amount, source_currency,
+        destination_amount, destination_currency, normalized_fx_rate,
         from_account_id, to_account_id,
         counterparty, note,
         recorded_at or now, now
@@ -1575,8 +2106,8 @@ def _execute_transaction(db, user_id, txn_type, amount,
             _auto_allocate_buckets(db, user_id)
 
     else:  # intra
-        new_from = old_from - amount
-        new_to = old_to + amount
+        new_from = old_from - source_amount
+        new_to = old_to + destination_amount
         from_note = f"Transfer out → {to_acc['name']}" + (f' — {note}' if note else '')
         to_note = f"Transfer in ← {from_acc['name']}" + (f' — {note}' if note else '')
         _create_txn_balance_entry(db, from_account_id, new_from, txn_id, from_note, recorded_at)
@@ -1920,6 +2451,25 @@ def logout():
     return jsonify({'ok': True, 'logged_in': False})
 
 
+@app.route('/api/user/preferences', methods=['PATCH'])
+@login_required
+def update_user_preferences():
+    d = request.get_json(silent=True) or {}
+    user_id = current_finance_user_id()
+    db = get_db()
+    if 'default_currency' in d:
+        try:
+            currency = _normalize_currency(d['default_currency'], field_name='default_currency', required=True)
+        except ValueError as e:
+            return _json_error(str(e), 400)
+        db.execute(
+            "UPDATE users SET default_currency=? WHERE id=?",
+            (currency, user_id)
+        )
+        db.commit()
+    return jsonify({'ok': True})
+
+
 # Accounts / Assets
 
 @app.route('/api/users', methods=['GET'])
@@ -1949,7 +2499,7 @@ def list_accounts():
     _append_owner_filter(where, params, alias='a', user_id=user_id, family_id=family_id)
     query = _ACCOUNT_SELECT + " WHERE " + " AND ".join(where) + " ORDER BY a.name, a.id"
     rows = db.execute(query, params).fetchall()
-    return jsonify([dict(r) for r in rows])
+    return jsonify(_serialize_account_rows(rows))
 
 
 @app.route('/api/accounts', methods=['POST'])
@@ -1958,9 +2508,17 @@ def create_account():
     d = request.get_json(silent=True) or {}
     db = get_db()
     user_id = current_finance_user_id()
+    share_payload = None
+    account_currency = _normalize_currency(d.get('currency'), default='USD')
+    if d.get('type') == 'shares':
+        try:
+            share_payload = _coerce_share_payload(d)
+        except ValueError as e:
+            return _json_error(str(e), 400)
+        account_currency = _share_native_currency(share_payload['exchange'])
     cur = db.execute(
-        "INSERT INTO accounts (user_id, name, type, institution) VALUES (?,?,?,?)",
-        (user_id, d['name'], d['type'], d.get('institution', ''))
+        "INSERT INTO accounts (user_id, name, type, institution, currency) VALUES (?,?,?,?,?)",
+        (user_id, d['name'], d['type'], d.get('institution', ''), account_currency)
     )
     account_id = cur.lastrowid
     price_info = None
@@ -1983,14 +2541,19 @@ def create_account():
 
     elif d['type'] == 'shares':
         db.execute("""
-            INSERT INTO share_details (account_id, stock_name, exchange, stock_code, quantity)
-            VALUES (?,?,?,?,?)
+            INSERT INTO share_details (
+                account_id, stock_name, exchange, stock_code, quantity,
+                purchase_price, purchase_price_currency
+            )
+            VALUES (?,?,?,?,?,?,?)
         """, (
             account_id,
-            d.get('stock_name', ''),
-            d.get('exchange', ''),
-            d.get('stock_code', '').upper().strip(),
-            d.get('quantity', 0) or 0,
+            share_payload['stock_name'],
+            share_payload['exchange'],
+            share_payload['stock_code'],
+            share_payload['quantity'],
+            share_payload['purchase_price'],
+            share_payload['purchase_price_currency'],
         ))
         db.commit()
         try:
@@ -2000,7 +2563,7 @@ def create_account():
 
     db.commit()
     row = db.execute(_ACCOUNT_SELECT + " WHERE a.id=?", (account_id,)).fetchone()
-    result = dict(row)
+    result = _serialize_account_row(row, rates=_fetch_usd_rates())
     if price_info:
         result['_price_fetch'] = price_info
     return jsonify(result), 201
@@ -2014,8 +2577,10 @@ def update_account(aid):
     account = _owned_account(db, aid)
     if not account:
         return _json_error('Account not found', 404)
+    old_currency = _account_currency(account)
 
     fields = {k: v for k, v in d.items() if k in ('name', 'type', 'institution')}
+    target_type = fields.get('type', account['type'])
     if fields:
         set_clause = ', '.join(f"{k}=?" for k in fields)
         db.execute(f"UPDATE accounts SET {set_clause} WHERE id=?", (*fields.values(), aid))
@@ -2045,34 +2610,89 @@ def update_account(aid):
                 (aid, -abs(loan_fields['remaining_principal']), 'Principal update')
             )
 
-    share_keys = {'stock_name', 'exchange', 'stock_code', 'quantity'}
+    share_keys = {'stock_name', 'exchange', 'stock_code', 'quantity', 'purchase_price', 'purchase_price_currency'}
     share_fields = {k: v for k, v in d.items() if k in share_keys}
     price_info = None
-    if share_fields:
+    if share_fields and target_type != 'shares':
+        return _json_error('Share details can only be set on shares assets', 400)
+
+    new_currency = old_currency
+    if share_fields or (target_type == 'shares' and account['type'] != 'shares'):
+        existing_share = db.execute("""
+            SELECT stock_name, exchange, stock_code, quantity, purchase_price, purchase_price_currency
+            FROM share_details
+            WHERE account_id=?
+        """, (aid,)).fetchone()
+        try:
+            share_payload = _coerce_share_payload(
+                d,
+                existing=dict(existing_share) if existing_share else None,
+                partial=bool(existing_share),
+            )
+        except ValueError as e:
+            return _json_error(str(e), 400)
+        new_currency = _share_native_currency(share_payload['exchange'])
         db.execute("""
-            INSERT INTO share_details (account_id, stock_name, exchange, stock_code, quantity)
-            VALUES (:account_id, :sn, :ex, :sc, :qty)
+            INSERT INTO share_details (
+                account_id, stock_name, exchange, stock_code, quantity,
+                purchase_price, purchase_price_currency
+            )
+            VALUES (:account_id, :sn, :ex, :sc, :qty, :pp, :ppc)
             ON CONFLICT(account_id) DO UPDATE SET
                 stock_name = excluded.stock_name,
                 exchange   = excluded.exchange,
                 stock_code = excluded.stock_code,
-                quantity   = excluded.quantity
+                quantity   = excluded.quantity,
+                purchase_price = excluded.purchase_price,
+                purchase_price_currency = excluded.purchase_price_currency
         """, {
             'account_id': aid,
-            'sn': share_fields.get('stock_name', ''),
-            'ex': share_fields.get('exchange', ''),
-            'sc': (share_fields.get('stock_code', '') or '').upper().strip(),
-            'qty': share_fields.get('quantity', 0) or 0,
+            'sn': share_payload['stock_name'],
+            'ex': share_payload['exchange'],
+            'sc': share_payload['stock_code'],
+            'qty': share_payload['quantity'],
+            'pp': share_payload['purchase_price'],
+            'ppc': share_payload['purchase_price_currency'],
         })
+    elif 'currency' in d:
+        try:
+            new_currency = _normalize_currency(d.get('currency'), field_name='currency', required=True)
+        except ValueError as e:
+            return _json_error(str(e), 400)
+
+    if target_type != 'shares' and 'currency' in d and not share_fields:
+        fields['currency'] = new_currency
+        db.execute("UPDATE accounts SET currency=? WHERE id=?", (new_currency, aid))
+
+    if target_type == 'shares':
+        db.execute("UPDATE accounts SET currency=? WHERE id=?", (new_currency, aid))
+
+    if new_currency != old_currency:
+        _convert_account_currency_storage(
+            db,
+            aid,
+            old_currency,
+            new_currency,
+            account_type=target_type,
+            skip_loan_details=bool(loan_fields),
+        )
+
+    should_remote_refresh = bool({'exchange', 'stock_code'} & share_fields.keys())
+    should_cached_revalue = 'quantity' in share_fields and not should_remote_refresh
+    if should_remote_refresh:
         db.commit()
         try:
             price_info = _auto_price_and_entry(db, aid)
         except Exception as e:
             price_info = {'error': str(e)}
+    elif should_cached_revalue:
+        cached = _revalue_share_from_cached_price(db, aid)
+        if cached:
+            price_info = cached
 
     db.commit()
     row = db.execute(_ACCOUNT_SELECT + " WHERE a.id=?", (aid,)).fetchone()
-    result = dict(row)
+    result = _serialize_account_row(row, rates=_fetch_usd_rates())
     if price_info:
         result['_price_fetch'] = price_info
     return jsonify(result)
@@ -2089,9 +2709,71 @@ def refresh_stock_price(aid):
         info = _auto_price_and_entry(db, aid)
         db.commit()
         row = db.execute(_ACCOUNT_SELECT + " WHERE a.id=?", (aid,)).fetchone()
-        return jsonify({**info, 'ok': True, 'account': dict(row)})
+        return jsonify({**info, 'ok': True, 'account': _serialize_account_row(row, rates=_fetch_usd_rates())})
     except Exception as e:
         return _json_error(str(e), 502)
+
+
+@app.route('/api/accounts/<int:aid>/apply-emi', methods=['POST'])
+@login_required
+def apply_loan_emi(aid):
+    db = get_db()
+    account = _owned_account(db, aid)
+    if not account or account['type'] != 'loan':
+        return _json_error('Not a loan account', 400)
+
+    ld = db.execute(
+        "SELECT interest_rate, remaining_tenure, monthly_emi, remaining_principal FROM loan_details WHERE account_id=?",
+        (aid,)
+    ).fetchone()
+    if not ld:
+        return _json_error('Loan details not found', 400)
+
+    principal  = float(ld['remaining_principal'] or 0)
+    emi        = float(ld['monthly_emi'] or 0)
+    tenure     = int(ld['remaining_tenure'] or 0)
+    annual_rate = float(ld['interest_rate'] or 0)
+
+    if tenure <= 0:
+        return _json_error('Loan is already fully paid off', 400)
+    if emi <= 0:
+        return _json_error('Monthly EMI is not set', 400)
+
+    monthly_rate      = annual_rate / 12 / 100
+    interest_component = round(principal * monthly_rate, 2)
+    principal_component = round(max(emi - interest_component, 0), 2)
+    new_principal      = round(max(principal - principal_component, 0), 2)
+    new_tenure         = tenure - 1
+
+    db.execute(
+        "UPDATE loan_details SET remaining_principal=?, remaining_tenure=? WHERE account_id=?",
+        (new_principal, new_tenure, aid)
+    )
+    note = (
+        f'EMI payment — principal {_fmt_amount(principal_component)}, '
+        f'interest {_fmt_amount(interest_component)}'
+        + (' (LOAN CLOSED)' if new_principal <= 0 else f', {new_tenure} months remaining')
+    )
+    db.execute(
+        "INSERT INTO balance_entries (account_id, amount, note) VALUES (?,?,?)",
+        (aid, -new_principal, note)
+    )
+    db.commit()
+
+    row = db.execute(_ACCOUNT_SELECT + " WHERE a.id=?", (aid,)).fetchone()
+    return jsonify({
+        'ok': True,
+        'emi': emi,
+        'interest': interest_component,
+        'principal_paid': principal_component,
+        'new_principal': new_principal,
+        'new_tenure': new_tenure,
+        'account': _serialize_account_row(row, rates=_fetch_usd_rates()),
+    })
+
+
+def _fmt_amount(v):
+    return f'{v:,.2f}'
 
 
 @app.route('/api/accounts/<int:aid>', methods=['DELETE'])
@@ -2119,7 +2801,7 @@ def list_balances():
     account_id = request.args.get('account_id')
     user_id, family_id = _scope_filters(scope)
     query = """
-        SELECT be.*, a.name AS account_name, a.type AS account_type, u.name AS user_name
+        SELECT be.*, a.name AS account_name, a.type AS account_type, a.currency AS account_currency, u.name AS user_name
         FROM balance_entries be
         JOIN accounts a ON a.id = be.account_id
         JOIN users u ON u.id = a.user_id
@@ -2137,7 +2819,7 @@ def list_balances():
         params.extend(filter_params)
     query += " ORDER BY be.recorded_at DESC LIMIT 200"
     rows = get_db().execute(query, params).fetchall()
-    return jsonify([dict(r) for r in rows])
+    return jsonify(_serialize_balance_rows(rows))
 
 
 @app.route('/api/balances/latest', methods=['GET'])
@@ -2151,7 +2833,7 @@ def latest_balances():
     user_id, family_id = _scope_filters(scope)
     params = []
     query = """
-        SELECT be.*, a.name AS account_name, a.type AS account_type, u.name AS user_name
+        SELECT be.*, a.name AS account_name, a.type AS account_type, a.currency AS account_currency, u.name AS user_name
         FROM balance_entries be
         JOIN accounts a ON a.id = be.account_id
         JOIN users u ON u.id = a.user_id
@@ -2168,7 +2850,7 @@ def latest_balances():
         query += " AND " + " AND ".join(filters)
     query += " ORDER BY a.name"
     rows = get_db().execute(query, params).fetchall()
-    return jsonify([dict(r) for r in rows])
+    return jsonify(_serialize_balance_rows(rows))
 
 
 @app.route('/api/balances', methods=['POST'])
@@ -2221,8 +2903,9 @@ def create_balance():
                 effective_manual_allocations.pop(alloc['bucket_id'], None)
 
         total_allocated = sum(effective_manual_allocations.values())
-        amount = float(d['amount'])
-        if amount >= 0 and total_allocated - amount > 1e-9:
+        amount_native = float(d['amount'])
+        amount_usd = _currency_to_usd(amount_native, account['currency'])
+        if amount_native >= 0 and total_allocated - amount_usd > 1e-9:
             return _json_error(
                 'Manual bucket allocations from the latest snapshot exceed this bank balance. Update the manual bucket amounts for this entry.',
                 400
@@ -2258,12 +2941,12 @@ def create_balance():
 
     db.commit()
     row = db.execute("""
-        SELECT be.*, a.name AS account_name
+        SELECT be.*, a.name AS account_name, a.currency AS account_currency
         FROM balance_entries be
         JOIN accounts a ON a.id = be.account_id
         WHERE be.id=?
     """, (entry_id,)).fetchone()
-    result = dict(row)
+    result = _serialize_balance_row(row, rates=_fetch_usd_rates())
     if auto_allocation_result:
         result['_auto_allocate'] = auto_allocation_result
     return jsonify(result), 201
@@ -2422,22 +3105,25 @@ def net_worth():
         """be.id = (
               SELECT id FROM balance_entries b2
               WHERE b2.account_id = be.account_id
-              ORDER BY recorded_at DESC LIMIT 1
+              ORDER BY id DESC LIMIT 1
           )""",
     ]
     _append_owner_filter(where, params, alias='a', user_id=user_id, family_id=family_id)
     rows = db.execute(f"""
-        SELECT be.amount, a.type
+        SELECT be.amount, a.type, a.currency
         FROM balance_entries be
         JOIN accounts a ON a.id = be.account_id
         WHERE {" AND ".join(where)}
     """, params).fetchall()
-    total = sum(r['amount'] for r in rows)
+    rates = _fetch_usd_rates()   # single call — cached daily
+    total = 0.0
     by_type = {}
     for r in rows:
-        by_type[r['type']] = by_type.get(r['type'], 0) + r['amount']
+        usd_amount = _currency_to_usd(r['amount'], r['currency'], rates=rates)
+        total += usd_amount
+        by_type[r['type']] = by_type.get(r['type'], 0) + usd_amount
 
-    funds = _cash_position_summary(db, user_id=user_id, family_id=family_id)
+    funds = _cash_position_summary(db, user_id=user_id, family_id=family_id, rates=rates)
     return jsonify({'total': total, 'by_type': by_type, 'unallocated_cash': funds['unallocated_cash']})
 
 
@@ -2459,29 +3145,34 @@ def bucket_summary():
         query += " WHERE " + " AND ".join(filters)
     query += " ORDER BY sort_order, name"
     buckets = db.execute(query, params).fetchall()
+
+    # Single aggregation query for all bucket allocations (replaces N+1 loop)
+    alloc_filters = [
+        "a.is_active = 1",
+        """be.id = (
+            SELECT id FROM balance_entries b2
+            WHERE b2.account_id = be.account_id
+            ORDER BY id DESC LIMIT 1
+        )""",
+    ]
+    alloc_params = []
+    _append_owner_filter(alloc_filters, alloc_params, alias='a', user_id=user_id, family_id=family_id)
+    alloc_rows = db.execute(f"""
+        SELECT ba.bucket_id, COALESCE(SUM(ba.amount), 0) AS allocated
+        FROM bucket_allocations ba
+        JOIN balance_entries be ON be.id = ba.balance_entry_id
+        JOIN accounts a ON a.id = be.account_id
+        WHERE {" AND ".join(alloc_filters)}
+        GROUP BY ba.bucket_id
+    """, alloc_params).fetchall()
+    allocated_by_bucket = {row['bucket_id']: row['allocated'] for row in alloc_rows}
+
     results = []
     for b in buckets:
-        alloc_filters = [
-            "a.is_active = 1",
-            """be.id = (
-                SELECT id FROM balance_entries b2
-                WHERE b2.account_id = be.account_id
-                ORDER BY recorded_at DESC LIMIT 1
-            )""",
-        ]
-        alloc_params = [b['id']]
-        _append_owner_filter(alloc_filters, alloc_params, alias='a', user_id=user_id, family_id=family_id)
-        row = db.execute(f"""
-            SELECT COALESCE(SUM(ba.amount), 0) AS allocated
-            FROM bucket_allocations ba
-            JOIN balance_entries be ON be.id = ba.balance_entry_id
-            JOIN accounts a ON a.id = be.account_id
-            WHERE ba.bucket_id = ?
-              AND {" AND ".join(alloc_filters)}
-        """, alloc_params).fetchone()
         d = dict(b)
-        d['allocated'] = row['allocated']
+        d['allocated'] = allocated_by_bucket.get(b['id'], 0.0)
         results.append(d)
+
     if scope == 'all':
         return jsonify(_merge_bucket_rows(results))
     return jsonify(results)
@@ -2502,7 +3193,7 @@ def timeline():
     user_id, family_id = _scope_filters(scope)
     db = get_db()
     params_accounts = []
-    accounts_query = "SELECT id, user_id, name, type FROM accounts WHERE is_active=1"
+    accounts_query = "SELECT id, user_id, name, type, currency FROM accounts WHERE is_active=1"
     filters = []
     _append_owner_filter(filters, params_accounts, alias='accounts', user_id=user_id, family_id=family_id)
     if filters:
@@ -2522,20 +3213,36 @@ def timeline():
     all_periods = set()
     account_series = []
 
-    for acc in accounts:
-        rows = db.execute(f"""
-            SELECT recorded_at, amount
-            FROM balance_entries be
-            WHERE account_id=? {where}
-            ORDER BY recorded_at
-        """, (acc['id'], *params_base)).fetchall()
+    rates = _fetch_usd_rates()   # single call — cached daily
 
+    # Single query fetching all balance entries for all user accounts at once
+    if accounts:
+        acc_ids = [a['id'] for a in accounts]
+        placeholders = ','.join('?' * len(acc_ids))
+        all_entries = db.execute(f"""
+            SELECT be.account_id, be.recorded_at, be.amount
+            FROM balance_entries be
+            WHERE be.account_id IN ({placeholders}) {where}
+            ORDER BY be.account_id, be.recorded_at
+        """, (*acc_ids, *params_base)).fetchall()
+    else:
+        all_entries = []
+
+    # Group entries by account_id
+    from collections import defaultdict
+    entries_by_account = defaultdict(list)
+    for row in all_entries:
+        entries_by_account[row['account_id']].append(row)
+
+    acc_map = {a['id']: dict(a) for a in accounts}
+    for acc in accounts:
+        rows = entries_by_account[acc['id']]
         period_map = {}
         for r in rows:
             period = _period_label(r['recorded_at'], interval)
             if period is None:
                 continue
-            period_map[period] = r['amount']
+            period_map[period] = _currency_to_usd(r['amount'], acc['currency'], rates=rates)
         all_periods.update(period_map.keys())
         account_series.append({'account': dict(acc), 'data': period_map})
 
@@ -2617,7 +3324,7 @@ def list_transactions():
         query += " WHERE " + " AND ".join(where)
     query += " ORDER BY t.recorded_at DESC, t.id DESC LIMIT 200"
     rows = db.execute(query, params).fetchall()
-    return jsonify([dict(r) for r in rows])
+    return jsonify(_serialize_transaction_rows(rows))
 
 
 @app.route('/api/transactions', methods=['POST'])
@@ -2638,6 +3345,7 @@ def create_transaction():
     counterparty = (d.get('counterparty') or '').strip() or None
     note = (d.get('note') or '').strip() or None
     recorded_at = d.get('recorded_at') or None
+    fx_rate = d.get('fx_rate')
 
     try:
         if from_account_id is not None:
@@ -2655,6 +3363,7 @@ def create_transaction():
             counterparty=counterparty,
             note=note,
             recorded_at=recorded_at,
+            fx_rate=fx_rate,
         )
         db.commit()
     except ValueError as e:
@@ -2672,7 +3381,7 @@ def create_transaction():
         LEFT JOIN accounts ta ON ta.id = t.to_account_id
         WHERE t.id = ?
     """, (txn_id,)).fetchone()
-    return jsonify(dict(row)), 201
+    return jsonify(_serialize_transaction_row(row, rates=_fetch_usd_rates())), 201
 
 
 @app.route('/api/transactions/<int:tid>', methods=['DELETE'])

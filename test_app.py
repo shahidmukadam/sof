@@ -35,11 +35,14 @@ _mod.DB_PATH = _DB_FILE.name
 from app import app as _flask_app, init_db, migrate_db      # noqa: E402
 
 # ── Deterministic mock values used across all shares tests ───────────────────
-#   price=500 INR, qty=10 shares, rate=100 INR/USD  →  value = 50 USD
-_PRICE    = 500.0
-_CURRENCY = 'INR'
-_TICKER   = 'TESTCO.NS'
-_RATES    = {'AED': 4.0, 'INR': 100.0, 'USD': 1.0}
+#   price=500 INR, purchase=450 INR, qty=10, rate=100 INR/USD
+#   → market value = 5000 INR, cost basis = 4500 INR, gain = 500 INR
+_PRICE             = 500.0
+_PURCHASE_PRICE    = 450.0
+_CURRENCY          = 'INR'
+_PURCHASE_CURRENCY = 'INR'
+_TICKER            = 'TESTCO.NS'
+_RATES             = {'AED': 4.0, 'INR': 100.0, 'USD': 1.0}
 
 # ── Test auth credentials ─────────────────────────────────────────────────────
 _TEST_EMAIL    = 'testuser@example.com'
@@ -128,24 +131,31 @@ class _Base(unittest.TestCase):
         return json.loads(resp.data)
 
     # ── Asset factories ───────────────────────────────────────────────────────
-    def _bank(self, name='Savings', institution='Test Bank'):
-        return self._j(self._post('/api/accounts',
-                                  {'name': name, 'type': 'bank',
-                                   'institution': institution}))
+    def _bank(self, name='Savings', institution='Test Bank', currency=None):
+        body = {'name': name, 'type': 'bank', 'institution': institution}
+        if currency:
+            body['currency'] = currency
+        return self._j(self._post('/api/accounts', body))
 
-    def _investment(self, name='Portfolio'):
-        return self._j(self._post('/api/accounts',
-                                  {'name': name, 'type': 'investment_group'}))
+    def _investment(self, name='Portfolio', currency=None):
+        body = {'name': name, 'type': 'investment_group'}
+        if currency:
+            body['currency'] = currency
+        return self._j(self._post('/api/accounts', body))
 
     def _loan(self, name='Home Loan', principal=10000.0, emi=500.0,
-              rate=8.5, tenure=24):
-        return self._j(self._post('/api/accounts', {
+              rate=8.5, tenure=24, currency=None):
+        body = {
             'name': name, 'type': 'loan',
             'interest_rate': rate, 'remaining_tenure': tenure,
             'monthly_emi': emi, 'remaining_principal': principal,
-        }))
+        }
+        if currency:
+            body['currency'] = currency
+        return self._j(self._post('/api/accounts', body))
 
-    def _shares(self, name='TESTCO', exchange='NSE', code='TESTCO', qty=10):
+    def _shares(self, name='TESTCO', exchange='NSE', code='TESTCO', qty=10,
+                purchase_price=_PURCHASE_PRICE, purchase_price_currency=_PURCHASE_CURRENCY):
         with patch.object(_mod, '_fetch_stock_price',
                           return_value=(_PRICE, _CURRENCY, _TICKER)), \
              patch.object(_mod, '_fetch_usd_rates', return_value=_RATES):
@@ -153,6 +163,8 @@ class _Base(unittest.TestCase):
                 'name': name, 'type': 'shares',
                 'stock_name': 'Test Company Ltd',
                 'exchange': exchange, 'stock_code': code, 'quantity': qty,
+                'purchase_price': purchase_price,
+                'purchase_price_currency': purchase_price_currency,
             })
         return self._j(r)
 
@@ -198,6 +210,10 @@ class TestAssetsCRUD(_Base):
         acc = self._investment('Vanguard Portfolio')
         self.assertEqual('investment_group', acc['type'])
 
+    def test_create_bank_account_stores_selected_native_currency(self):
+        acc = self._bank('Mashreq', currency='AED')
+        self.assertEqual('AED', acc['currency'])
+
     def test_list_accounts_returns_all_active_assets(self):
         self._bank('Bank A')
         self._bank('Bank B')
@@ -234,6 +250,18 @@ class TestAssetsCRUD(_Base):
         self.assertEqual('bank', updated['type'])
         self.assertEqual('New Bank', updated['institution'])
 
+    def test_update_account_currency_converts_existing_balance_entries(self):
+        bank = self._bank('USD Wallet', currency='USD')
+        self._entry(bank['id'], 100.0)
+        with patch.object(_mod, '_fetch_usd_rates', return_value=_RATES):
+            updated = self._j(self._patch(f'/api/accounts/{bank["id"]}', {'currency': 'AED'}))
+        entries = self._j(self._get(f'/api/balances?account_id={bank["id"]}'))
+        latest = sorted(entries, key=lambda e: e['id'], reverse=True)[0]
+        self.assertEqual('AED', updated['currency'])
+        self.assertAlmostEqual(400.0, updated['latest_balance'], places=2)
+        self.assertAlmostEqual(400.0, latest['amount'], places=2)
+        self.assertEqual('AED', latest['amount_currency'])
+
     def test_delete_account_returns_ok_true(self):
         acc = self._bank()
         r = self._delete(f'/api/accounts/{acc["id"]}')
@@ -254,6 +282,12 @@ class TestAssetsCRUD(_Base):
         self.assertIn('exchange', match)
         self.assertIn('stock_code', match)
         self.assertIn('quantity', match)
+        self.assertIn('purchase_price', match)
+        self.assertIn('purchase_price_currency', match)
+        self.assertIn('cost_basis_total', match)
+        self.assertIn('unrealized_gain_loss', match)
+        self.assertIn('unrealized_gain_loss_pct', match)
+        self.assertIn('is_profitable', match)
 
 
 # =============================================================================
@@ -334,6 +368,24 @@ class TestSharesAccountDetails(_Base):
         self.assertEqual('RELIANCE',  s['stock_code'])
         self.assertEqual(50,          s['quantity'])
 
+    def test_create_shares_stores_purchase_price_and_currency(self):
+        s = self._shares(purchase_price=12.75, purchase_price_currency='AED')
+        self.assertAlmostEqual(12.75, s['purchase_price'], places=4)
+        self.assertEqual('INR', s['purchase_price_currency'])
+        self.assertEqual('INR', s['currency'])
+
+    def test_create_shares_purchase_currency_tracks_exchange_currency(self):
+        s = self._shares(exchange='DFM', purchase_price_currency='INR')
+        self.assertEqual('AED', s['purchase_price_currency'])
+        self.assertEqual('AED', s['currency'])
+
+    def test_create_shares_returns_cost_basis_and_profitability_fields(self):
+        s = self._shares(qty=10, purchase_price=450.0, purchase_price_currency='INR')
+        self.assertAlmostEqual(4500.0, s['cost_basis_total'], places=2)
+        self.assertAlmostEqual(500.0, s['unrealized_gain_loss'], places=2)
+        self.assertAlmostEqual(11.111111, s['unrealized_gain_loss_pct'], places=4)
+        self.assertTrue(s['is_profitable'])
+
     def test_create_shares_uppercases_stock_code_before_storing(self):
         with patch.object(_mod, '_fetch_stock_price',
                           return_value=(_PRICE, _CURRENCY, _TICKER)), \
@@ -341,6 +393,8 @@ class TestSharesAccountDetails(_Base):
             s = self._j(self._post('/api/accounts', {
                 'name': 'Reliance', 'type': 'shares',
                 'exchange': 'NSE', 'stock_code': 'reliance', 'quantity': 10,
+                'purchase_price': _PURCHASE_PRICE,
+                'purchase_price_currency': _PURCHASE_CURRENCY,
             }))
         self.assertEqual('RELIANCE', s['stock_code'])
 
@@ -351,15 +405,29 @@ class TestSharesAccountDetails(_Base):
             r = self._post('/api/accounts', {
                 'name': 'EMAAR', 'type': 'shares',
                 'exchange': 'DFM', 'stock_code': 'EMAAR', 'quantity': 100,
+                'purchase_price': 8.5,
+                'purchase_price_currency': 'AED',
             })
         self.assertEqual(201, r.status_code)
 
+    def test_create_shares_requires_purchase_price_currency(self):
+        with patch.object(_mod, '_fetch_stock_price',
+                          return_value=(_PRICE, _CURRENCY, _TICKER)), \
+             patch.object(_mod, '_fetch_usd_rates', return_value=_RATES):
+            r = self._post('/api/accounts', {
+                'name': 'EMAAR', 'type': 'shares',
+                'exchange': 'DFM', 'stock_code': 'EMAAR', 'quantity': 100,
+                'purchase_price': 8.5,
+            })
+        self.assertEqual(400, r.status_code)
+
     def test_create_shares_auto_fetches_price_and_creates_balance_entry(self):
-        # 500 INR × 10 shares / 100 INR per USD = 50 USD
+        # 500 INR × 10 shares = 5000 INR stored on the account
         s = self._shares(qty=10)
         entries = self._j(self._get(f'/api/balances?account_id={s["id"]}'))
         self.assertEqual(1, len(entries))
-        self.assertAlmostEqual(50.0, entries[0]['amount'], places=2)
+        self.assertAlmostEqual(5000.0, entries[0]['amount'], places=2)
+        self.assertEqual('INR', entries[0]['amount_currency'])
 
     def test_create_shares_stores_fetched_price_and_currency_in_share_details(self):
         s = self._shares(qty=5)
@@ -372,6 +440,8 @@ class TestSharesAccountDetails(_Base):
             r = self._post('/api/accounts', {
                 'name': 'Unreachable', 'type': 'shares',
                 'exchange': 'DFM', 'stock_code': 'EMAAR', 'quantity': 10,
+                'purchase_price': 8.5,
+                'purchase_price_currency': 'AED',
             })
         self.assertEqual(201, r.status_code)
 
@@ -381,6 +451,8 @@ class TestSharesAccountDetails(_Base):
             data = self._j(self._post('/api/accounts', {
                 'name': 'Unreachable', 'type': 'shares',
                 'exchange': 'DFM', 'stock_code': 'EMAAR', 'quantity': 10,
+                'purchase_price': 8.5,
+                'purchase_price_currency': 'AED',
             }))
         self.assertIn('error', data.get('_price_fetch', {}))
 
@@ -390,6 +462,8 @@ class TestSharesAccountDetails(_Base):
             s = self._j(self._post('/api/accounts', {
                 'name': 'Unreachable', 'type': 'shares',
                 'exchange': 'DFM', 'stock_code': 'EMAAR', 'quantity': 10,
+                'purchase_price': 8.5,
+                'purchase_price_currency': 'AED',
             }))
         entries = self._j(self._get(f'/api/balances?account_id={s["id"]}'))
         self.assertEqual(0, len(entries))
@@ -405,6 +479,29 @@ class TestSharesAccountDetails(_Base):
         self.assertTrue(result['ok'])
         self.assertIn('price', result)
         self.assertIn('value_usd', result)
+        self.assertAlmostEqual(1500.0, result['account']['unrealized_gain_loss'], places=2)
+
+    def test_update_shares_purchase_price_recomputes_profitability(self):
+        s = self._shares(qty=10, purchase_price=450.0, purchase_price_currency='INR')
+        with patch.object(_mod, '_fetch_stock_price',
+                          return_value=(_PRICE, _CURRENCY, _TICKER)), \
+             patch.object(_mod, '_fetch_usd_rates', return_value=_RATES):
+            updated = self._j(self._patch(f'/api/accounts/{s["id"]}', {
+                'purchase_price': 600.0,
+                'purchase_price_currency': 'INR',
+            }))
+        self.assertAlmostEqual(6000.0, updated['cost_basis_total'], places=2)
+        self.assertAlmostEqual(-1000.0, updated['unrealized_gain_loss'], places=2)
+        self.assertFalse(updated['is_profitable'])
+
+    def test_update_shares_purchase_price_does_not_fetch_remote_price(self):
+        s = self._shares(qty=10, purchase_price=450.0, purchase_price_currency='INR')
+        with patch.object(_mod, '_fetch_stock_price', side_effect=AssertionError('should not refresh price')):
+            updated = self._j(self._patch(f'/api/accounts/{s["id"]}', {
+                'purchase_price': 525.0,
+                'purchase_price_currency': 'INR',
+            }))
+        self.assertAlmostEqual(5250.0, updated['cost_basis_total'], places=2)
 
     def test_refresh_price_creates_new_balance_entry_with_updated_value(self):
         s = self._shares(qty=10)
@@ -417,8 +514,8 @@ class TestSharesAccountDetails(_Base):
         self.assertEqual(initial_count + 1, len(entries))
         # Sort by id DESC — auto-increment guarantees the newest entry has the highest id
         latest = sorted(entries, key=lambda e: e['id'], reverse=True)[0]
-        # 600 INR × 10 / 100 = 60 USD
-        self.assertAlmostEqual(60.0, latest['amount'], places=2)
+        # 600 INR × 10 = 6000 INR, with a USD helper field alongside it
+        self.assertAlmostEqual(6000.0, latest['amount'], places=2)
 
     def test_refresh_price_on_bank_account_returns_400(self):
         bank = self._bank()
@@ -1120,6 +1217,36 @@ class TestTransactions(_Base):
         inv_entries = self._j(self._get(f'/api/balances?account_id={inv["id"]}'))
         self.assertTrue(any(e.get('transaction_id') == txn['id'] for e in bank_entries))
         self.assertTrue(any(e.get('transaction_id') == txn['id'] for e in inv_entries))
+
+    def test_intra_cross_currency_transfer_uses_fx_rate_for_destination(self):
+        bank = self._bank(currency='AED')
+        inv = self._investment(currency='INR')
+        self._entry(bank['id'], 1000)
+        self._entry(inv['id'], 0)
+        with patch.object(_mod, '_fetch_usd_rates', return_value=_RATES):
+            txn = self._j(self._post('/api/transactions', {
+                'txn_type': 'intra',
+                'amount': 100,
+                'from_account_id': bank['id'],
+                'to_account_id': inv['id'],
+                'fx_rate': 20.0,
+                'note': 'FX move',
+            }))
+        self.assertAlmostEqual(25.0, txn['amount'], places=5)
+        self.assertAlmostEqual(25.0, txn['source_amount_usd'], places=5)
+        self.assertAlmostEqual(100.0, txn['source_amount'], places=2)
+        self.assertEqual('AED', txn['source_currency'])
+        self.assertAlmostEqual(2000.0, txn['destination_amount'], places=2)
+        self.assertEqual('INR', txn['destination_currency'])
+        self.assertAlmostEqual(20.0, txn['fx_rate'], places=4)
+        bank_entries = self._j(self._get(f'/api/balances?account_id={bank["id"]}'))
+        inv_entries = self._j(self._get(f'/api/balances?account_id={inv["id"]}'))
+        latest_bank = sorted(bank_entries, key=lambda e: e['id'], reverse=True)[0]
+        latest_inv = sorted(inv_entries, key=lambda e: e['id'], reverse=True)[0]
+        self.assertAlmostEqual(900.0, latest_bank['amount_native'], places=6)
+        self.assertEqual('AED', latest_bank['amount_currency'])
+        self.assertAlmostEqual(2000.0, latest_inv['amount_native'], places=6)
+        self.assertEqual('INR', latest_inv['amount_currency'])
 
     # ── list & delete ─────────────────────────────────────────────────────────
 

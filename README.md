@@ -29,6 +29,7 @@ All persisted money values are stored in `USD`. The frontend converts values int
 - [schema_postgres.sql](schema_postgres.sql): PostgreSQL schema for hosted deployments
 - [templates/index.html](templates/index.html): single-page shell and modal markup
 - [static/app.js](static/app.js): client-side state, rendering, modal flows, API calls, charts
+- [seed_sample_data.py](seed_sample_data.py): non-destructive demo seed for a fresh SQLite or PostgreSQL database
 - [requirements.txt](requirements.txt): Python dependency list
 - `secret.key`: locally generated Flask session secret, created on first startup and gitignored
 - [render.yaml](render.yaml): optional Render Blueprint for a web service plus Render Postgres
@@ -590,6 +591,41 @@ Optional runtime environment variables:
 - `SOF_SECRET_KEY`: explicit Flask secret value, preferred for hosted deployments
 - `SOF_SECRET_KEY_PATH`: explicit secret-key file path when not using `SOF_SECRET_KEY`
 
+## Loading Sample Seed Data
+
+For demos or screenshots, you can seed a fresh database with realistic sample data:
+
+```bash
+python seed_sample_data.py
+```
+
+The seed script:
+
+- uses the same backend selection as the app, so it respects `DATABASE_URL`, `SOF_DATABASE_URL`, `SOF_DATA_DIR`, and `SOF_DB_PATH`
+- refuses to run if the target database already contains users, accounts, buckets, transactions, or balance entries
+- creates two demo users in one family, a mix of bank/investment/share/loan assets, manual and auto buckets, and a few transactions
+
+Demo sign-in credentials created by the seed:
+
+- `aaliyah.demo@example.com` / `DemoPass!123`
+- `hassan.demo@example.com` / `DemoPass!123`
+
+Typical local workflow with a throwaway SQLite file:
+
+```bash
+SOF_DB_PATH=/tmp/state-of-finance-demo.db \
+SOF_SECRET_KEY=dev-secret \
+python seed_sample_data.py
+```
+
+Then start the app against the same database:
+
+```bash
+SOF_DB_PATH=/tmp/state-of-finance-demo.db \
+SOF_SECRET_KEY=dev-secret \
+python app.py
+```
+
 ## Deploying On Render
 
 Recommended Render setup is a web service plus Render Postgres. The app switches to PostgreSQL automatically when `DATABASE_URL` is set.
@@ -643,6 +679,5 @@ Important Render notes:
 - Add tests around summary, timeline, and migration behavior
 - Move external API fetches behind a service layer with retries/caching
 - Enforce backend validation for asset-specific entry rules
-- Add README screenshots or sample seed data
 - Split the frontend script into modules as the UI grows
 - Formalize migrations instead of embedding schema rewrites in app startup

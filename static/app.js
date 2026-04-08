@@ -20,6 +20,13 @@ const state = {
 
 const charts = {};
 const fmtCache = {};
+const SHARE_EXCHANGE_CURRENCIES = {
+  DFM: 'AED',
+  ADX: 'AED',
+  'NASDAQ Dubai': 'USD',
+  NSE: 'INR',
+  BSE: 'INR',
+};
 
 class ApiError extends Error {
   constructor(message, data, status) {
@@ -46,6 +53,48 @@ function money(v) {
   return getFmt(state.currency).format(converted);
 }
 
+function moneyInCurrency(v, currency, { minimumFractionDigits = 0, maximumFractionDigits } = {}) {
+  if (v === null || v === undefined || v === '') return '—';
+  const digits = maximumFractionDigits ?? (currency === 'INR' ? 0 : 2);
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: currency || 'USD',
+    minimumFractionDigits,
+    maximumFractionDigits: digits,
+  }).format(Number(v));
+}
+
+function moneyFromStored(v, currency, usdValue = null, options = {}) {
+  if (v === null || v === undefined || v === '') return '—';
+  if (currency) {
+    const converted = convertAmount(Number(v), currency, state.currency);
+    return moneyInCurrency(converted, state.currency, options);
+  }
+  if (usdValue !== null && usdValue !== undefined) {
+    return money(usdValue);
+  }
+  return moneyInCurrency(Number(v), state.currency, options);
+}
+
+function signedMoney(v) {
+  if (v === null || v === undefined) return '—';
+  const sign = v > 0 ? '+' : v < 0 ? '-' : '';
+  return `${sign}${money(Math.abs(v))}`;
+}
+
+function signedMoneyFromStored(v, currency, usdValue = null, options = {}) {
+  if (v === null || v === undefined) return '—';
+  const sign = v > 0 ? '+' : v < 0 ? '-' : '';
+  const normalizedUsd = usdValue === null || usdValue === undefined ? null : Math.abs(usdValue);
+  return `${sign}${moneyFromStored(Math.abs(v), currency, normalizedUsd, options)}`;
+}
+
+function signedPercent(v, fractionDigits = 1) {
+  if (v === null || v === undefined) return '';
+  const sign = v > 0 ? '+' : '';
+  return `${sign}${Number(v).toFixed(fractionDigits)}%`;
+}
+
 function moneyInputValue(v) {
   if (v === null || v === undefined) return '';
   const converted = v * (state.rates[state.currency] || 1);
@@ -70,6 +119,17 @@ function modalCurrencySymbol(currency) {
 
 function currencySymbol() {
   return { AED: 'AED', INR: '₹' }[state.currency] || state.currency;
+}
+
+function shareExchangeCurrency(exchange) {
+  return SHARE_EXCHANGE_CURRENCIES[exchange] || 'USD';
+}
+
+function convertAmount(v, fromCurrency, toCurrency) {
+  if (v === null || v === undefined || v === '') return 0;
+  const usd = toUSDWithCurrency(Number(v), fromCurrency || 'USD');
+  if (!toCurrency || toCurrency === 'USD') return usd;
+  return usd * (state.rates[toCurrency] || 1);
 }
 
 function typeLabel(t) {
@@ -116,6 +176,69 @@ function setSelectOptions(select, options) {
     option.selected = !!selected;
     return option;
   }));
+}
+
+function getOrCreateChartTooltip(chart) {
+  const tooltipId = `chart-tooltip-${chart.canvas.id || 'default'}`;
+  let el = document.getElementById(tooltipId);
+  if (el) return el;
+
+  el = document.createElement('div');
+  el.id = tooltipId;
+  el.className = 'fixed z-50 pointer-events-none rounded-xl border border-slate-700 bg-slate-900/95 px-3 py-2 shadow-2xl backdrop-blur-sm transition-opacity duration-75';
+  el.style.opacity = '0';
+  el.style.maxWidth = '320px';
+  el.style.left = '0px';
+  el.style.top = '0px';
+  document.body.appendChild(el);
+  return el;
+}
+
+function makeExternalTooltipHandler({ showTitle = true } = {}) {
+  return ({ chart, tooltip }) => {
+    const el = getOrCreateChartTooltip(chart);
+    if (!tooltip || tooltip.opacity === 0) {
+      el.style.opacity = '0';
+      return;
+    }
+
+    const titleHtml = showTitle && tooltip.title?.length
+      ? `<div class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">${tooltip.title.map(escapeHtml).join('<br>')}</div>`
+      : '';
+
+    const bodyItems = tooltip.body || [];
+    const labelColors = tooltip.labelColors || [];
+    const bodyHtml = bodyItems.map((item, index) => {
+      const lines = (item.lines || []).map(line => escapeHtml(String(line).trimStart())).join('<br>');
+      const color = safeColor(labelColors[index]?.backgroundColor, '#94a3b8');
+      return `
+        <div class="flex items-start gap-2 text-xs text-slate-100">
+          <span class="mt-1 inline-block h-2 w-2 shrink-0 rounded-full" style="background:${color}"></span>
+          <div>${lines}</div>
+        </div>
+      `;
+    }).join('');
+
+    el.innerHTML = `${titleHtml}${bodyHtml}`;
+    el.style.opacity = '1';
+
+    const rect = chart.canvas.getBoundingClientRect();
+    const padding = 12;
+    const preferredRight = rect.left + tooltip.caretX + 16;
+    const preferredLeft = rect.left + tooltip.caretX - el.offsetWidth - 16;
+    let left = preferredRight;
+    if (left + el.offsetWidth > window.innerWidth - padding) left = preferredLeft;
+    if (left < padding) left = padding;
+
+    let top = rect.top + tooltip.caretY - (el.offsetHeight / 2);
+    if (top + el.offsetHeight > window.innerHeight - padding) {
+      top = window.innerHeight - el.offsetHeight - padding;
+    }
+    if (top < padding) top = padding;
+
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+  };
 }
 
 function nowLocal() {
@@ -198,25 +321,42 @@ function mergeAccountsForView(accounts) {
         name: acc.name,
         type: acc.type,
         institution: acc.institution || '',
+        currency: acc.currency || 'USD',
         user_name: acc.user_name,
         _merged_count: 1,
         _institutions: new Set(acc.institution ? [acc.institution] : []),
+        _currencies: new Set(acc.currency ? [acc.currency] : []),
         interest_rate: acc.interest_rate,
         remaining_tenure: acc.remaining_tenure,
         monthly_emi: acc.monthly_emi || 0,
+        monthly_emi_usd: acc.monthly_emi_usd ?? null,
         remaining_principal: acc.remaining_principal || 0,
+        remaining_principal_usd: acc.remaining_principal_usd ?? null,
+        monthly_emi_native: acc.monthly_emi_native ?? null,
+        remaining_principal_native: acc.remaining_principal_native ?? null,
         stock_name: acc.stock_name || '',
         exchange: acc.exchange || '',
         stock_code: acc.stock_code || '',
         quantity: acc.quantity || 0,
+        latest_balance: acc.latest_balance ?? null,
+        latest_balance_usd: acc.latest_balance_usd ?? null,
+        latest_balance_native: acc.latest_balance_native ?? null,
+        purchase_price: acc.purchase_price,
+        purchase_price_currency: acc.purchase_price_currency || '',
         last_price: acc.last_price,
         last_price_currency: acc.last_price_currency || '',
         last_fetched: acc.last_fetched || null,
+        cost_basis_total: acc.cost_basis_total ?? null,
+        cost_basis_total_usd: acc.cost_basis_total_usd ?? null,
+        unrealized_gain_loss: acc.unrealized_gain_loss ?? null,
+        unrealized_gain_loss_usd: acc.unrealized_gain_loss_usd ?? null,
         _interest_rates: new Set(acc.interest_rate != null ? [String(acc.interest_rate)] : []),
         _tenures: new Set(acc.remaining_tenure != null ? [String(acc.remaining_tenure)] : []),
         _stock_names: new Set(acc.stock_name ? [acc.stock_name] : []),
         _exchanges: new Set(acc.exchange ? [acc.exchange] : []),
         _stock_codes: new Set(acc.stock_code ? [acc.stock_code] : []),
+        _purchase_prices: new Set(acc.purchase_price != null ? [String(acc.purchase_price)] : []),
+        _purchase_price_currencies: new Set(acc.purchase_price_currency ? [acc.purchase_price_currency] : []),
         _last_prices: new Set(acc.last_price != null ? [String(acc.last_price)] : []),
         _last_price_currencies: new Set(acc.last_price_currency ? [acc.last_price_currency] : []),
       });
@@ -226,16 +366,43 @@ function mergeAccountsForView(accounts) {
     const current = groups.get(key);
     current._merged_count += 1;
     pushUnique(current._institutions, acc.institution);
+    pushUnique(current._currencies, acc.currency);
     pushUnique(current._interest_rates, acc.interest_rate != null ? acc.interest_rate : null);
     pushUnique(current._tenures, acc.remaining_tenure != null ? acc.remaining_tenure : null);
     pushUnique(current._stock_names, acc.stock_name);
     pushUnique(current._exchanges, acc.exchange);
     pushUnique(current._stock_codes, acc.stock_code);
+    pushUnique(current._purchase_prices, acc.purchase_price != null ? acc.purchase_price : null);
+    pushUnique(current._purchase_price_currencies, acc.purchase_price_currency);
     pushUnique(current._last_prices, acc.last_price != null ? acc.last_price : null);
     pushUnique(current._last_price_currencies, acc.last_price_currency);
     current.monthly_emi = (current.monthly_emi || 0) + (acc.monthly_emi || 0);
+    if (acc.monthly_emi_usd != null) {
+      current.monthly_emi_usd = (current.monthly_emi_usd || 0) + acc.monthly_emi_usd;
+    }
     current.remaining_principal = (current.remaining_principal || 0) + (acc.remaining_principal || 0);
+    if (acc.remaining_principal_usd != null) {
+      current.remaining_principal_usd = (current.remaining_principal_usd || 0) + acc.remaining_principal_usd;
+    }
     current.quantity = (current.quantity || 0) + (acc.quantity || 0);
+    if (acc.latest_balance != null) {
+      current.latest_balance = (current.latest_balance || 0) + acc.latest_balance;
+    }
+    if (acc.latest_balance_usd != null) {
+      current.latest_balance_usd = (current.latest_balance_usd || 0) + acc.latest_balance_usd;
+    }
+    if (acc.cost_basis_total != null) {
+      current.cost_basis_total = (current.cost_basis_total || 0) + acc.cost_basis_total;
+    }
+    if (acc.cost_basis_total_usd != null) {
+      current.cost_basis_total_usd = (current.cost_basis_total_usd || 0) + acc.cost_basis_total_usd;
+    }
+    if (acc.unrealized_gain_loss != null) {
+      current.unrealized_gain_loss = (current.unrealized_gain_loss || 0) + acc.unrealized_gain_loss;
+    }
+    if (acc.unrealized_gain_loss_usd != null) {
+      current.unrealized_gain_loss_usd = (current.unrealized_gain_loss_usd || 0) + acc.unrealized_gain_loss_usd;
+    }
     if (acc.last_fetched && (!current.last_fetched || acc.last_fetched > current.last_fetched)) {
       current.last_fetched = acc.last_fetched;
     }
@@ -246,14 +413,31 @@ function mergeAccountsForView(accounts) {
     return {
       ...acc,
       institution: Array.from(acc._institutions).join(', '),
+      currency: oneOrBlank(acc._currencies) || '',
       user_name: formatUserBadgeLabel(acc._merged_count),
       interest_rate: oneOrBlank(acc._interest_rates),
       remaining_tenure: oneOrBlank(acc._tenures),
       stock_name: oneOrBlank(acc._stock_names) || (acc._stock_names.size > 1 ? 'Multiple holdings' : ''),
       exchange: oneOrBlank(acc._exchanges) || (acc._exchanges.size > 1 ? 'Multiple' : ''),
       stock_code: oneOrBlank(acc._stock_codes) || (acc._stock_codes.size > 1 ? 'Multiple' : ''),
+      purchase_price: acc._purchase_prices.size === 1 ? Number(Array.from(acc._purchase_prices)[0]) : null,
+      purchase_price_currency: oneOrBlank(acc._purchase_price_currencies),
       last_price: acc._last_prices.size === 1 ? Number(Array.from(acc._last_prices)[0]) : null,
       last_price_currency: oneOrBlank(acc._last_price_currencies),
+      latest_balance: acc.latest_balance,
+      latest_balance_usd: acc.latest_balance_usd,
+      monthly_emi_usd: acc.monthly_emi_usd,
+      remaining_principal_usd: acc.remaining_principal_usd,
+      cost_basis_total: acc.type === 'shares' ? acc.cost_basis_total : null,
+      cost_basis_total_usd: acc.type === 'shares' ? acc.cost_basis_total_usd : null,
+      unrealized_gain_loss: acc.type === 'shares' ? acc.unrealized_gain_loss : null,
+      unrealized_gain_loss_usd: acc.type === 'shares' ? acc.unrealized_gain_loss_usd : null,
+      unrealized_gain_loss_pct: acc.type === 'shares' && acc.cost_basis_total
+        ? (acc.unrealized_gain_loss || 0) / acc.cost_basis_total * 100
+        : null,
+      is_profitable: acc.type === 'shares' && acc.unrealized_gain_loss != null
+        ? acc.unrealized_gain_loss > 0
+        : null,
     };
   }).sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -304,9 +488,13 @@ function getManualBuckets() {
   return state.buckets.filter(b => bucketAllocationType(b) === 'manual');
 }
 
+function getAccountById(accountId) {
+  return state.accounts.find(a => Number(a.id) === Number(accountId)) || null;
+}
+
 function getSelectedEntryAccount() {
   const accountId = parseInt(document.getElementById('entAccount')?.value);
-  return state.accounts.find(a => a.id === accountId) || null;
+  return getAccountById(accountId);
 }
 
 function getEntryAllocatableBuckets() {
@@ -458,6 +646,19 @@ function setSessionPayload(payload) {
   state.session = payload?.logged_in ? payload : null;
   state.selectedScope = 'me';
   document.getElementById('scopeSelect').value = state.selectedScope;
+  // Apply user's saved default currency on login
+  if (state.session?.user?.default_currency) {
+    state.currency = ['AED', 'INR', 'USD'].includes(state.session.user.default_currency)
+      ? state.session.user.default_currency
+      : 'AED';
+    // Sync toggle buttons without triggering a save
+    document.querySelectorAll('.currency-btn').forEach(btn => {
+      const isActive = btn.id === `btn-${state.currency}`;
+      btn.classList.toggle('bg-slate-600', isActive);
+      btn.classList.toggle('text-white', isActive);
+      btn.classList.toggle('text-slate-400', !isActive);
+    });
+  }
   updateSessionUi();
   updateReadOnlyUi();
 }
@@ -605,14 +806,15 @@ async function handleAuthenticated(sessionPayload) {
   setAppVisibility(true);
   clearOtpPreview();
   updateCurrencyLabels();
-  await fetchRates();
-  updateCurrencyLabels();
-  await Promise.all([loadAccounts(), loadBuckets()]);
-  await loadDashboard();
-  if (!document.getElementById('tab-timeline').classList.contains('hidden')) {
-    await loadTimeline();
+  try {
+    await fetchRates();
+    updateCurrencyLabels();
+    await loadData();
+    _maybeStartOnboarding();
+  } catch (e) {
+    console.error('handleAuthenticated', e);
+    alert(`The dashboard could not finish loading.\n${e.message || e}`);
   }
-  _maybeStartOnboarding();
 }
 
 async function checkSession() {
@@ -630,11 +832,7 @@ async function onScopeChange() {
   state.selectedScope = document.getElementById('scopeSelect').value;
   updateReadOnlyUi();
   ['accountModal', 'bucketModal', 'entryModal', 'manualAllocateModal', 'historyModal'].forEach(closeModal);
-  await Promise.all([loadAccounts(), loadBuckets()]);
-  await loadDashboard();
-  if (!document.getElementById('tab-timeline').classList.contains('hidden')) {
-    await loadTimeline();
-  }
+  await loadData();
 }
 
 async function loadDashboard() {
@@ -645,6 +843,10 @@ async function loadDashboard() {
   ]);
   state.netWorthSummary = nw;
   state.bucketSummary = buckets;
+  await _renderDashboard(nw, buckets, recent);
+}
+
+async function _renderDashboard(nw, buckets, recent) {
 
   document.getElementById('netWorthTotal').textContent = money(nw.total);
   document.getElementById('unallocatedCashTotal').textContent = money(nw.unallocated_cash || 0);
@@ -722,7 +924,7 @@ async function loadDashboard() {
             ${noteHtml}
           </div>
           <div class="text-right">
-            <span class="text-sm font-semibold">${money(e.amount)}</span>
+            <span class="text-sm font-semibold">${moneyFromStored(e.amount, e.amount_currency, e.amount_usd)}</span>
             <span class="text-xs text-slate-400 ml-2">${dateHtml(e.recorded_at)}</span>
           </div>
         </div>
@@ -737,6 +939,34 @@ async function loadDashboard() {
   renderBuckets();
 }
 
+async function loadData() {
+  // Fire all independent requests in a single parallel wave
+  const timelineVisible = !document.getElementById('tab-timeline').classList.contains('hidden');
+  const requests = [
+    api(withScopeQuery('/api/accounts')),
+    api(withScopeQuery('/api/buckets')),
+    api(withScopeQuery('/api/summary/net-worth')),
+    api(withScopeQuery('/api/summary/buckets')),
+    api(withScopeQuery('/api/balances')),
+    timelineVisible ? api(withScopeQuery('/api/summary/timeline')) : Promise.resolve(null),
+  ];
+  const [accountRows, bucketRows, nw, bucketSummary, recent, timelineData] = await Promise.all(requests);
+
+  // Hydrate state
+  state.accounts = mergeAccountsForView(accountRows);
+  state.buckets = mergeBucketsForView(bucketRows);
+  state.netWorthSummary = nw;
+  state.bucketSummary = bucketSummary;
+
+  // Render everything
+  renderAccounts();
+  renderBuckets();
+  await _renderDashboard(nw, bucketSummary, recent);
+  if (timelineVisible && timelineData) {
+    _renderTimeline(timelineData);
+  }
+}
+
 function drawDonut(canvasId, data, labels, colors) {
   const ctx = document.getElementById(canvasId).getContext('2d');
   if (charts[canvasId]) charts[canvasId].destroy();
@@ -748,6 +978,8 @@ function drawDonut(canvasId, data, labels, colors) {
       plugins: {
         legend: { display: false },
         tooltip: {
+          enabled: false,
+          external: makeExternalTooltipHandler({ showTitle: false }),
           callbacks: { label: ctx => ` ${ctx.label}: ${money(ctx.raw)}` },
         },
       },
@@ -782,26 +1014,44 @@ function renderAccounts() {
     const accountId = Number(a.id);
     const isLoan = a.type === 'loan';
     const isShares = a.type === 'shares';
-    const metaLine = readOnly
+    const nativeCurrencyLabel = escapeHtml(a.currency || (isShares ? (a.purchase_price_currency || shareExchangeCurrency(a.exchange)) : 'Mixed'));
+    const metaLineParts = readOnly
       ? [
           a.institution || (isShares && a.stock_name ? a.stock_name : ''),
           a.user_name ? `Merged across ${a.user_name}` : '',
-        ].filter(Boolean).join(' · ')
-      : (a.institution || (isShares && a.stock_name ? a.stock_name : ''));
+        ]
+      : [a.institution || (isShares && a.stock_name ? a.stock_name : '')];
+    if (!isLoan && !isShares) {
+      metaLineParts.push(`Native: ${a.currency || 'Mixed'}`);
+    }
+    const metaLine = metaLineParts.filter(Boolean).join(' · ');
     const accountName = escapeHtml(a.name);
     const metaLineHtml = escapeHtml(metaLine);
     const exchangeHtml = escapeHtml(a.exchange || '—');
     const stockCodeHtml = escapeHtml(a.stock_code || '—');
     const priceHtml = a.last_price != null
-      ? `${escapeHtml(a.last_price_currency || '')} ${Number(a.last_price).toLocaleString(undefined, { maximumFractionDigits: 4 })}`
+      ? escapeHtml(moneyFromStored(a.last_price, a.last_price_currency || shareExchangeCurrency(a.exchange), null, { maximumFractionDigits: 4 }))
       : 'Not fetched yet';
+    const purchasePriceHtml = a.purchase_price != null
+      ? escapeHtml(moneyFromStored(a.purchase_price, a.purchase_price_currency || shareExchangeCurrency(a.exchange), null, { maximumFractionDigits: 4 }))
+      : '—';
+    const profitClass = a.unrealized_gain_loss > 0
+      ? 'text-emerald-300'
+      : a.unrealized_gain_loss < 0
+        ? 'text-rose-300'
+        : 'text-slate-300';
+    const profitText = a.unrealized_gain_loss != null
+      ? signedMoneyFromStored(a.unrealized_gain_loss, a.currency || a.purchase_price_currency, a.unrealized_gain_loss_usd)
+      : '—';
+    const profitPct = a.unrealized_gain_loss_pct != null ? signedPercent(a.unrealized_gain_loss_pct) : '';
 
     const loanMeta = isLoan ? `
       <div class="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-400">
+        <span>Native: <span class="text-orange-300">${nativeCurrencyLabel}</span></span>
         <span>Rate: <span class="text-orange-300">${a.interest_rate ?? '—'}% p.a.</span></span>
         <span>Tenure: <span class="text-orange-300">${a.remaining_tenure ?? '—'} mo</span></span>
-        <span>EMI: <span class="text-orange-300">${a.monthly_emi != null ? money(a.monthly_emi) : '—'}</span></span>
-        <span>Principal: <span class="text-orange-300">${a.remaining_principal != null ? money(a.remaining_principal) : '—'}</span></span>
+        <span>EMI: <span class="text-orange-300">${a.monthly_emi != null ? moneyFromStored(a.monthly_emi, a.currency, a.monthly_emi_usd) : '—'}</span></span>
+        <span>Principal: <span class="text-orange-300">${a.remaining_principal != null ? moneyFromStored(a.remaining_principal, a.currency, a.remaining_principal_usd) : '—'}</span></span>
       </div>` : '';
 
     const sharesMeta = isShares ? `
@@ -809,11 +1059,37 @@ function renderAccounts() {
         <span>Exchange: <span class="text-indigo-300">${exchangeHtml}</span></span>
         <span>Ticker: <span class="text-indigo-300">${stockCodeHtml}</span></span>
         <span>Qty: <span class="text-indigo-300">${a.quantity != null ? Number(a.quantity).toLocaleString() : '—'} shares</span></span>
+        <span>Native: <span class="text-indigo-300">${nativeCurrencyLabel}</span></span>
         <span>Price: <span class="text-indigo-300">${priceHtml}</span></span>
+        <span>Bought at: <span class="text-indigo-300">${purchasePriceHtml}</span></span>
+        <span>Cost basis: <span class="text-slate-200">${a.cost_basis_total != null ? moneyFromStored(a.cost_basis_total, a.currency || a.purchase_price_currency, a.cost_basis_total_usd) : '—'}</span></span>
+        <span class="col-span-2">P/L: <span class="${profitClass}">${profitText}</span>${profitPct ? `<span class="ml-1 text-slate-500">(${escapeHtml(profitPct)})</span>` : ''}</span>
         ${a.last_fetched ? `<span class="col-span-2 text-slate-500">Updated: ${dateHtml(a.last_fetched)}</span>` : ''}
       </div>` : '';
 
     const cardBorder = isLoan ? 'border border-orange-500/20' : isShares ? 'border border-indigo-500/20' : '';
+
+    // Balance display
+    let balanceHtml = '';
+    if (isShares && a.latest_balance != null) {
+      balanceHtml = `<div class="text-right">
+        <p class="text-sm font-semibold text-indigo-300">${moneyFromStored(a.latest_balance, a.currency, a.latest_balance_usd)}</p>
+        <p class="text-xs text-slate-500">market value</p>
+        ${a.unrealized_gain_loss != null ? `<p class="text-xs ${profitClass}">${profitText}${profitPct ? ` (${escapeHtml(profitPct)})` : ''}</p>` : ''}
+      </div>`;
+    } else if (isLoan && a.remaining_principal != null) {
+      balanceHtml = `<div class="text-right">
+        <p class="text-sm font-semibold text-orange-300">${moneyFromStored(Math.abs(a.remaining_principal), a.currency, a.remaining_principal_usd != null ? Math.abs(a.remaining_principal_usd) : null)}</p>
+        <p class="text-xs text-slate-500">outstanding</p>
+      </div>`;
+    } else if (a.latest_balance != null) {
+      const balColor = a.latest_balance < 0 ? 'text-rose-300' : 'text-emerald-300';
+      balanceHtml = `<div class="text-right">
+        <p class="text-sm font-semibold ${balColor}">${moneyFromStored(a.latest_balance, a.currency, a.latest_balance_usd)}</p>
+        <p class="text-xs text-slate-500">balance</p>
+      </div>`;
+    }
+
     return `
       <div class="bg-slate-800 rounded-xl px-5 py-4 ${cardBorder}">
         <div class="flex items-center justify-between">
@@ -824,15 +1100,19 @@ function renderAccounts() {
             </div>
             <span class="text-xs px-2 py-0.5 rounded-full ${typeColors[a.type] || 'bg-slate-500/20 text-slate-400'}">${escapeHtml(typeLabel(a.type))}</span>
           </div>
-          ${readOnly ? `
-          <div class="text-xs text-slate-500 px-3 py-1.5 rounded-lg bg-slate-900/40 border border-slate-700/70">View only</div>` : `
-          <div class="flex items-center gap-2">
-            <button onclick="viewHistory(${accountId})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">History</button>
-            ${isShares ? `<button data-refresh="${accountId}" onclick="refreshPrice(${accountId})" class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">↻ Price</button>` : ''}
-            ${(!isLoan && !isShares) ? `<button onclick="openAddEntry(${accountId})" class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">+ Entry</button>` : ''}
-            <button onclick="openAccountModal(${accountId})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Edit</button>
-            <button onclick="deleteAccount(${accountId})" class="text-xs text-rose-400 hover:text-rose-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Delete</button>
-          </div>`}
+          <div class="flex items-center gap-3">
+            ${balanceHtml}
+            ${readOnly ? `
+            <div class="text-xs text-slate-500 px-3 py-1.5 rounded-lg bg-slate-900/40 border border-slate-700/70">View only</div>` : `
+            <div class="flex items-center gap-2">
+              <button onclick="viewHistory(${accountId})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">History</button>
+              ${isShares ? `<button data-refresh="${accountId}" onclick="refreshPrice(${accountId})" class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">↻ Price</button>` : ''}
+              ${isLoan ? `<button id="emi-btn-${accountId}" onclick="applyEmi(${accountId})" class="text-xs text-orange-400 hover:text-orange-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Pay EMI</button>` : ''}
+              ${(!isLoan && !isShares) ? `<button onclick="openAddEntry(${accountId})" class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">+ Entry</button>` : ''}
+              <button onclick="openAccountModal(${accountId})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Edit</button>
+              <button onclick="deleteAccount(${accountId})" class="text-xs text-rose-400 hover:text-rose-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Delete</button>
+            </div>`}
+          </div>
         </div>
         ${loanMeta}${sharesMeta}
       </div>
@@ -842,8 +1122,23 @@ function renderAccounts() {
 
 function onAccTypeChange() {
   const type = document.getElementById('accType').value;
+  document.getElementById('accCurrencyRow').classList.toggle('hidden', type === 'shares');
   document.getElementById('loanFields').classList.toggle('hidden', type !== 'loan');
   document.getElementById('shareFields').classList.toggle('hidden', type !== 'shares');
+  if (type === 'shares') syncShareDefaultsFromExchange();
+}
+
+function syncShareDefaultsFromExchange(force = false) {
+  const exchangeSelect = document.getElementById('shareExchange');
+  const currencySelect = document.getElementById('sharePurchasePriceCurrency');
+  if (!exchangeSelect || !currencySelect) return;
+  if (force || currencySelect.value !== shareExchangeCurrency(exchangeSelect.value)) {
+    currencySelect.value = shareExchangeCurrency(exchangeSelect.value);
+  }
+  const accountCurrencySelect = document.getElementById('accCurrency');
+  if (accountCurrencySelect && document.getElementById('accType')?.value === 'shares') {
+    accountCurrencySelect.value = currencySelect.value;
+  }
 }
 
 function openAccountModal(id = null) {
@@ -856,37 +1151,46 @@ function openAccountModal(id = null) {
     document.getElementById('accName').value = acc.name;
     document.getElementById('accType').value = acc.type;
     document.getElementById('accInstitution').value = acc.institution || '';
+    document.getElementById('accCurrency').value = acc.currency || 'USD';
     const isLoan = acc.type === 'loan';
     const isShares = acc.type === 'shares';
+    document.getElementById('accCurrencyRow').classList.toggle('hidden', isShares);
     document.getElementById('loanFields').classList.toggle('hidden', !isLoan);
     document.getElementById('shareFields').classList.toggle('hidden', !isShares);
     if (isLoan) {
       document.getElementById('loanRate').value = acc.interest_rate ?? '';
       document.getElementById('loanTenure').value = acc.remaining_tenure ?? '';
-      const loanCurrSel = document.getElementById('loanAmountCurrency');
-      if (loanCurrSel) loanCurrSel.value = state.currency;
-      const rate = state.rates[state.currency] || 1;
-      document.getElementById('loanEMI').value = acc.monthly_emi ? (acc.monthly_emi * rate).toFixed(2) : '';
-      document.getElementById('loanPrincipal').value = acc.remaining_principal ? (acc.remaining_principal * rate).toFixed(2) : '';
+      document.getElementById('loanEMI').value = acc.monthly_emi_native ?? '';
+      document.getElementById('loanPrincipal').value = acc.remaining_principal_native ?? '';
     }
     if (isShares) {
       document.getElementById('shareStockName').value = acc.stock_name || '';
       document.getElementById('shareExchange').value = acc.exchange || 'DFM';
       document.getElementById('shareStockCode').value = acc.stock_code || '';
       document.getElementById('shareQty').value = acc.quantity ?? '';
+      document.getElementById('sharePurchasePrice').value = acc.purchase_price ?? '';
+      const sharePurchaseCurrency = document.getElementById('sharePurchasePriceCurrency');
+      if (sharePurchaseCurrency) {
+        const currency = acc.purchase_price_currency || shareExchangeCurrency(acc.exchange);
+        sharePurchaseCurrency.value = currency;
+      }
     }
   } else {
     document.getElementById('accName').value = '';
     document.getElementById('accType').value = 'bank';
     document.getElementById('accInstitution').value = '';
+    document.getElementById('accCurrency').value = state.currency;
+    document.getElementById('accCurrencyRow').classList.remove('hidden');
     document.getElementById('loanFields').classList.add('hidden');
     document.getElementById('shareFields').classList.add('hidden');
-    ['loanRate', 'loanTenure', 'loanEMI', 'loanPrincipal', 'shareStockName', 'shareStockCode', 'shareQty'].forEach(id => {
+    ['loanRate', 'loanTenure', 'loanEMI', 'loanPrincipal', 'shareStockName', 'shareStockCode', 'shareQty', 'sharePurchasePrice'].forEach(id => {
       document.getElementById(id).value = '';
     });
     document.getElementById('shareExchange').value = 'DFM';
-    const loanCurrSel = document.getElementById('loanAmountCurrency');
-    if (loanCurrSel) loanCurrSel.value = state.currency;
+    const sharePurchaseCurrency = document.getElementById('sharePurchasePriceCurrency');
+    if (sharePurchaseCurrency) {
+      syncShareDefaultsFromExchange(true);
+    }
   }
   updateCurrencyLabels();
   openModal('accountModal');
@@ -899,34 +1203,53 @@ async function saveAccount() {
   const type = document.getElementById('accType').value;
   const institution = document.getElementById('accInstitution').value.trim();
   if (!name) return;
+  const saveBtn = document.getElementById('accountSaveBtn');
 
   const payload = { name, type, institution };
+  if (type !== 'shares') payload.currency = document.getElementById('accCurrency').value;
   if (type === 'loan') {
-    const loanCurrency = document.getElementById('loanAmountCurrency')?.value || state.currency;
     payload.interest_rate = parseFloat(document.getElementById('loanRate').value) || 0;
     payload.remaining_tenure = parseInt(document.getElementById('loanTenure').value) || 0;
-    payload.monthly_emi = toUSDWithCurrency(parseFloat(document.getElementById('loanEMI').value) || 0, loanCurrency);
-    payload.remaining_principal = toUSDWithCurrency(parseFloat(document.getElementById('loanPrincipal').value) || 0, loanCurrency);
+    payload.monthly_emi = parseFloat(document.getElementById('loanEMI').value) || 0;
+    payload.remaining_principal = parseFloat(document.getElementById('loanPrincipal').value) || 0;
   }
   if (type === 'shares') {
+    const purchasePriceInput = document.getElementById('sharePurchasePrice').value.trim();
+    if (!purchasePriceInput) {
+      alert('Purchase price is required for shares.');
+      return;
+    }
     payload.stock_name = document.getElementById('shareStockName').value.trim();
     payload.exchange = document.getElementById('shareExchange').value;
     payload.stock_code = document.getElementById('shareStockCode').value.trim().toUpperCase();
     payload.quantity = parseFloat(document.getElementById('shareQty').value) || 0;
+    payload.purchase_price = parseFloat(purchasePriceInput);
+    payload.purchase_price_currency = shareExchangeCurrency(payload.exchange);
   }
 
-  let result;
-  if (state.editingAccountId) {
-    result = await api(`/api/accounts/${state.editingAccountId}`, 'PATCH', payload);
-  } else {
-    result = await api('/api/accounts', 'POST', payload);
+  if (saveBtn) {
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving...';
   }
-  closeModal('accountModal');
-  if (result._price_fetch?.error) {
-    alert(`Asset saved, but stock price could not be fetched:\n${result._price_fetch.error}\n\nUse ↻ Refresh to retry.`);
+  try {
+    let result;
+    if (state.editingAccountId) {
+      result = await api(`/api/accounts/${state.editingAccountId}`, 'PATCH', payload);
+    } else {
+      result = await api('/api/accounts', 'POST', payload);
+    }
+    closeModal('accountModal');
+    if (result._price_fetch?.error) {
+      alert(`Asset saved, but stock price could not be fetched:\n${result._price_fetch.error}\n\nUse ↻ Refresh to retry.`);
+    }
+    await loadAccounts();
+    await loadDashboard();
+  } finally {
+    if (saveBtn) {
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save';
+    }
   }
-  await loadAccounts();
-  await loadDashboard();
 }
 
 async function refreshPrice(accountId) {
@@ -949,6 +1272,28 @@ async function refreshPrice(accountId) {
   }
 }
 
+async function applyEmi(accountId) {
+  const btn = document.getElementById(`emi-btn-${accountId}`);
+  if (btn) { btn.textContent = '…'; btn.disabled = true; }
+  try {
+    const res = await api(`/api/accounts/${accountId}/apply-emi`, 'POST');
+    if (!res.ok) throw new Error(res.error || 'Unknown error');
+    // Update account in state directly so re-render is instant
+    const idx = state.accounts.findIndex(a => a.id === accountId);
+    if (idx !== -1) state.accounts[idx] = res.account;
+    renderAccounts();
+    await loadDashboard();
+    const tenure = res.new_tenure;
+    const msg = tenure <= 0
+      ? `🎉 Loan fully paid off!`
+      : `EMI applied.\n• Principal paid: ${moneyFromStored(res.principal_paid, res.account?.currency)}\n• Interest: ${moneyFromStored(res.interest, res.account?.currency)}\n• Outstanding: ${moneyFromStored(res.new_principal, res.account?.currency)}\n• Months remaining: ${tenure}`;
+    alert(msg);
+  } catch (e) {
+    alert(`EMI failed:\n${e.message}`);
+    if (btn) { btn.textContent = 'Pay EMI'; btn.disabled = false; }
+  }
+}
+
 async function deleteAccount(id) {
   if (!requireSingleUserSelection()) return;
   if (!confirm('Remove this asset?')) return;
@@ -966,12 +1311,12 @@ async function viewHistory(accountId) {
   if (!entries.length) {
     list.innerHTML = '<p class="text-slate-500 text-sm">No entries yet.</p>';
   } else {
-    list.innerHTML = entries.map(e => {
+      list.innerHTML = entries.map(e => {
       const noteHtml = e.note ? `<p class="text-xs text-slate-400">${escapeHtml(e.note)}</p>` : '';
       return `
         <div class="flex items-center justify-between py-3 border-b border-slate-700 last:border-0">
           <div>
-            <p class="text-sm font-semibold">${money(e.amount)}</p>
+            <p class="text-sm font-semibold">${moneyFromStored(e.amount, e.amount_currency, e.amount_usd)}</p>
             ${noteHtml}
           </div>
           <div class="flex items-center gap-3">
@@ -1261,8 +1606,6 @@ function openAddEntry(accountId = null) {
   document.getElementById('entDate').value = nowLocal();
   document.getElementById('entNote').value = '';
   document.getElementById('allocRemaining').textContent = '';
-  const entCurrSel = document.getElementById('entAmountCurrency');
-  if (entCurrSel) entCurrSel.value = state.currency;
   onEntryAccountChange();
   openModal('entryModal');
   setTimeout(() => document.getElementById('entAmount').focus(), 50);
@@ -1278,6 +1621,10 @@ function onEntryAccountChange() {
   );
 
   document.getElementById('allocRemaining').textContent = '';
+  const entCurrSel = document.getElementById('entAmountCurrency');
+  if (entCurrSel) {
+    entCurrSel.value = selectedAccount?.currency || state.currency;
+  }
 
   if (!selectedAccount || selectedAccount.type !== 'bank') {
     allocSection.classList.add('hidden');
@@ -1328,9 +1675,11 @@ async function saveEntry() {
   const account_id = parseInt(document.getElementById('entAccount').value);
   const rawAmount = parseFloat(document.getElementById('entAmount').value);
   if (!account_id || Number.isNaN(rawAmount)) return;
+  const account = getAccountById(account_id);
+  if (!account) return;
 
-  const entryCurrency = document.getElementById('entAmountCurrency')?.value || state.currency;
-  const amount = toUSDWithCurrency(rawAmount, entryCurrency);
+  const entryCurrency = account.currency || document.getElementById('entAmountCurrency')?.value || state.currency;
+  const amount = rawAmount;
   const recorded_at = document.getElementById('entDate').value;
   const note = document.getElementById('entNote').value.trim();
   const allocations = getEntryAllocatableBuckets()
@@ -1400,6 +1749,8 @@ async function loadTimeline() {
           labels: { color: '#94a3b8', boxWidth: 12, padding: 16 },
         },
         tooltip: {
+          enabled: false,
+          external: makeExternalTooltipHandler(),
           callbacks: {
             label: ctx => ` ${ctx.dataset.label}: ${money(ctx.raw)}`,
           },
@@ -1429,13 +1780,20 @@ function clearTimelineFilters() {
   loadTimeline();
 }
 
-async function fetchRates() {
+let _ratesFetchedAt = 0;
+const _RATES_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+async function fetchRates(force = false) {
+  const now = Date.now();
+  if (!force && _ratesFetchedAt && (now - _ratesFetchedAt) < _RATES_TTL_MS) return;
   try {
     const data = await api('/api/rates');
-    state.rates = data.rates;
-    const rate = data.rates[state.currency];
-    const symbols = { AED: 'د.إ', INR: '₹' };
+    state.rates = { ...data.rates, USD: 1 };
+    _ratesFetchedAt = Date.now();
+    const rate = state.rates[state.currency] || 1;
+    const symbols = { AED: 'د.إ', INR: '₹', USD: '$' };
     const label = document.getElementById('rateLabel');
+    if (!label) return;
     if (data.date) {
       label.textContent = `1 USD = ${symbols[state.currency]}${rate.toFixed(4)} · ${data.date}`;
     } else {
@@ -1445,6 +1803,11 @@ async function fetchRates() {
     console.warn('Rate fetch failed', e);
   }
 }
+
+// Silently refresh rates every 10 minutes while the app is open
+setInterval(() => {
+  if (state.session?.logged_in) fetchRates();
+}, _RATES_TTL_MS);
 
 function updateCurrencyLabels() {
   const sym = currencySymbol();
@@ -1472,6 +1835,7 @@ function updateCurrencyLabels() {
   }
 }
 
+let _currencyDebounceTimer = null;
 function setCurrency(c) {
   state.currency = c;
   document.querySelectorAll('.currency-btn').forEach(btn => {
@@ -1480,14 +1844,35 @@ function setCurrency(c) {
     btn.classList.toggle('text-white', isActive);
     btn.classList.toggle('text-slate-400', !isActive);
   });
-  const symbols = { AED: 'د.إ', INR: '₹' };
-  const rate = state.rates[c];
+  const symbols = { AED: 'د.إ', INR: '₹', USD: '$' };
+  const rate = state.rates[c] || 1;
   const label = document.getElementById('rateLabel');
-  const existing = label.textContent;
-  label.textContent = existing.replace(/[د.إ₹][^\s·]+/, `${symbols[c]}${rate.toFixed(4)}`);
+  if (label) {
+    const existing = label.textContent;
+    if (existing) {
+      label.textContent = existing.replace(/[^\s]+(?=\s(?:·|\(fallback\))|$)/, `${symbols[c]}${rate.toFixed(4)}`);
+    }
+  }
   updateCurrencyLabels();
+  renderAccounts();
+
+  // Re-render dashboard purely from cached state — no server call needed
+  if (state.netWorthSummary && state.bucketSummary) {
+    document.getElementById('netWorthTotal').textContent = money(state.netWorthSummary.total);
+    document.getElementById('unallocatedCashTotal').textContent = money(state.netWorthSummary.unallocated_cash || 0);
+    // Re-render bucket summary bars with new currency
+    if (state.bucketSummary.length) {
+      renderBuckets();
+    }
+  }
+
   if (state.session?.logged_in) {
-    loadDashboard();
+    // Persist default currency preference with debounce
+    clearTimeout(_currencyDebounceTimer);
+    _currencyDebounceTimer = setTimeout(() => {
+      api('/api/user/preferences', 'PATCH', { default_currency: c }).catch(() => {});
+      if (state.session?.user) state.session.user.default_currency = c;
+    }, 400);
   }
 }
 
@@ -1547,6 +1932,16 @@ function renderTransactions() {
       ? `<button onclick="deleteTransaction(${txnId})" class="ml-3 text-slate-500 hover:text-rose-400 text-xs transition-colors">Delete</button>`
       : '';
     const noteHtml = txn.note ? `<p class="text-xs text-slate-400 truncate mt-0.5">${escapeHtml(txn.note)}</p>` : '';
+    const primaryAmount = txn.txn_type === 'credit'
+      ? (txn.destination_amount != null ? `${amtPrefix}${moneyInCurrency(txn.destination_amount, txn.destination_currency || 'USD')}` : `${amtPrefix}${money(txn.amount)}`)
+      : txn.txn_type === 'debit'
+        ? (txn.source_amount != null ? `${amtPrefix}${moneyInCurrency(txn.source_amount, txn.source_currency || 'USD')}` : `${amtPrefix}${money(txn.amount)}`)
+        : (txn.source_amount != null && txn.destination_amount != null
+          ? `${moneyInCurrency(txn.source_amount, txn.source_currency || 'USD')} → ${moneyInCurrency(txn.destination_amount, txn.destination_currency || 'USD')}`
+          : money(txn.amount));
+    const secondaryAmount = txn.txn_type === 'intra' && txn.fx_rate && txn.source_currency && txn.destination_currency && txn.source_currency !== txn.destination_currency
+      ? `FX ${Number(txn.fx_rate).toFixed(4)} ${txn.destination_currency} / ${txn.source_currency}`
+      : (txn.amount != null ? `~ ${money(txn.amount)}` : '');
 
     return `
       <div class="bg-slate-700/50 rounded-xl px-4 py-3 flex items-center gap-3">
@@ -1556,7 +1951,8 @@ function renderTransactions() {
           ${noteHtml}
         </div>
         <div class="text-right shrink-0">
-          <p class="text-sm font-semibold ${amtClass}">${amtPrefix}${money(txn.amount)}</p>
+          <p class="text-sm font-semibold ${amtClass}">${escapeHtml(primaryAmount)}</p>
+          ${secondaryAmount ? `<p class="text-[11px] text-slate-500">${escapeHtml(secondaryAmount)}</p>` : ''}
           <p class="text-xs text-slate-500">${dateHtml(txn.recorded_at)}</p>
         </div>
         ${deleteBtn}
@@ -1602,18 +1998,69 @@ function setTxnType(type) {
     toRow?.classList.remove('hidden');
     counterpartyRow?.classList.add('hidden');
   }
+  onTransactionAccountChange();
 }
 
 function populateTxnAccountSelects() {
   const myAccounts = state.accounts.filter(a => !isAllUsersView() || a);
   const options = myAccounts
     .filter(a => typeof a.id === 'number') // skip merged entries from all-users view
-    .map(a => ({ value: a.id, label: `${a.name} (${typeLabel(a.type)})` }));
+    .map(a => ({ value: a.id, label: `${a.name} (${typeLabel(a.type)} · ${a.currency || 'USD'})` }));
 
   const fromSel = document.getElementById('txnFrom');
   const toSel = document.getElementById('txnTo');
   if (fromSel) setSelectOptions(fromSel, [{ value: '', label: '— select account —' }, ...options]);
   if (toSel) setSelectOptions(toSel, [{ value: '', label: '— select account —' }, ...options]);
+}
+
+function onTransactionAccountChange() {
+  const type = state.txnType;
+  const fromAccount = getAccountById(parseInt(document.getElementById('txnFrom')?.value));
+  const toAccount = getAccountById(parseInt(document.getElementById('txnTo')?.value));
+  const txnCurrSel = document.getElementById('txnAmountCurrency');
+  const fxSection = document.getElementById('txnFxSection');
+  const fxRateInput = document.getElementById('txnFxRate');
+  const fxHint = document.getElementById('txnFxHint');
+
+  if (type === 'credit' && txnCurrSel) {
+    txnCurrSel.value = toAccount?.currency || state.currency;
+  } else if ((type === 'debit' || type === 'intra') && txnCurrSel) {
+    txnCurrSel.value = fromAccount?.currency || state.currency;
+  }
+
+  const showFx = type === 'intra'
+    && fromAccount
+    && toAccount
+    && fromAccount.currency
+    && toAccount.currency
+    && fromAccount.currency !== toAccount.currency;
+
+  if (fxSection) fxSection.classList.toggle('hidden', !showFx);
+  if (showFx && fxRateInput) {
+    fxRateInput.value = (state.rates[toAccount.currency] / (state.rates[fromAccount.currency] || 1)).toFixed(6);
+    if (fxHint) fxHint.textContent = `1 ${fromAccount.currency} = ${fxRateInput.value} ${toAccount.currency}`;
+  } else if (fxHint) {
+    fxHint.textContent = '';
+  }
+  updateTransactionFxPreview();
+}
+
+function updateTransactionFxPreview() {
+  const preview = document.getElementById('txnFxPreview');
+  const fxSection = document.getElementById('txnFxSection');
+  if (!preview || !fxSection || fxSection.classList.contains('hidden')) {
+    if (preview) preview.textContent = '';
+    return;
+  }
+  const fromAccount = getAccountById(parseInt(document.getElementById('txnFrom')?.value));
+  const toAccount = getAccountById(parseInt(document.getElementById('txnTo')?.value));
+  const amount = parseFloat(document.getElementById('txnAmount')?.value) || 0;
+  const fxRate = parseFloat(document.getElementById('txnFxRate')?.value) || 0;
+  if (!fromAccount || !toAccount || !amount || !fxRate) {
+    preview.textContent = '';
+    return;
+  }
+  preview.textContent = `${moneyInCurrency(amount, fromAccount.currency)} -> ${moneyInCurrency(amount * fxRate, toAccount.currency)}`;
 }
 
 function openTransactionModal() {
@@ -1624,6 +2071,9 @@ function openTransactionModal() {
   document.getElementById('txnNote').value = '';
   document.getElementById('txnDate').value = nowLocal();
   document.getElementById('txnError').textContent = '';
+  document.getElementById('txnFxRate').value = '';
+  document.getElementById('txnFxHint').textContent = '';
+  document.getElementById('txnFxPreview').textContent = '';
 
   // Default currency dropdown to current global currency
   const txnCurrSel = document.getElementById('txnAmountCurrency');
@@ -1637,8 +2087,6 @@ function openTransactionModal() {
 async function saveTransaction() {
   const type = state.txnType;
   const amountDisplay = parseFloat(document.getElementById('txnAmount').value) || 0;
-  const txnCurrency = document.getElementById('txnAmountCurrency')?.value || state.currency;
-  const amountUSD = toUSDWithCurrency(amountDisplay, txnCurrency);
   const counterparty = document.getElementById('txnCounterparty').value.trim();
   const note = document.getElementById('txnNote').value.trim();
   const dateVal = document.getElementById('txnDate').value;
@@ -1664,14 +2112,27 @@ async function saveTransaction() {
     if (from_account_id === to_account_id) { errorEl.textContent = 'Source and destination must differ.'; return; }
   }
 
-  if (!amountUSD || amountUSD <= 0) { errorEl.textContent = 'Enter a valid amount greater than zero.'; return; }
+  if (!amountDisplay || amountDisplay <= 0) { errorEl.textContent = 'Enter a valid amount greater than zero.'; return; }
+
+  const fromAccount = from_account_id ? getAccountById(from_account_id) : null;
+  const toAccount = to_account_id ? getAccountById(to_account_id) : null;
+  const showFx = type === 'intra' && fromAccount && toAccount && fromAccount.currency !== toAccount.currency;
+  let fxRate = null;
+  if (showFx) {
+    fxRate = parseFloat(document.getElementById('txnFxRate').value) || 0;
+    if (!fxRate || fxRate <= 0) {
+      errorEl.textContent = 'Enter a valid FX rate.';
+      return;
+    }
+  }
 
   try {
     await api('/api/transactions', 'POST', {
       txn_type: type,
-      amount: amountUSD,
+      amount: amountDisplay,
       from_account_id,
       to_account_id,
+      fx_rate: fxRate,
       counterparty: counterparty || null,
       note: note || null,
       recorded_at: dateVal ? dateVal.replace('T', ' ') : null,
@@ -1741,8 +2202,8 @@ const COACH_STEPS = [
     tab: 'dashboard',
     target: '#currencyToggleGroup',
     placement: 'bottom',
-    title: '💱 Currency Toggle',
-    desc: 'Switch between AED (UAE Dirham) and INR (Indian Rupee). Every amount across the entire app — balances, buckets, transactions — instantly converts using live exchange rates.',
+    title: '💱 Set Your Default Currency',
+    desc: 'Switch between AED, INR, and USD. Every amount across the app converts instantly using live exchange rates.\n\n👆 Tap your preferred currency now — it\'s saved to your account and will be applied automatically every time you log in.',
   },
   {
     tab: 'dashboard',

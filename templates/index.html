@@ -326,6 +326,14 @@
             <label class="text-xs text-slate-400 block mb-1">Institution</label>
             <input id="accInstitution" type="text" placeholder="e.g. Chase, Vanguard" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
           </div>
+          <div id="accCurrencyRow">
+            <label class="text-xs text-slate-400 block mb-1">Account Currency</label>
+            <select id="accCurrency" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm">
+              <option value="AED">AED – UAE Dirham</option>
+              <option value="INR">INR – Indian Rupee</option>
+              <option value="USD">USD – US Dollar</option>
+            </select>
+          </div>
 
           <div id="shareFields" class="hidden space-y-3 border-t border-slate-700 pt-4">
             <p class="text-xs font-semibold text-indigo-400 uppercase tracking-wide">Stock Details</p>
@@ -336,7 +344,7 @@
             <div class="grid grid-cols-2 gap-3">
               <div>
                 <label class="text-xs text-slate-400 block mb-1">Stock Exchange</label>
-                <select id="shareExchange" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm">
+                <select id="shareExchange" onchange="syncShareDefaultsFromExchange()" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm">
                   <optgroup label="── UAE ──">
                     <option value="DFM">Dubai Financial Market (DFM)</option>
                     <option value="ADX">Abu Dhabi Securities Exchange (ADX)</option>
@@ -357,6 +365,20 @@
               <label class="text-xs text-slate-400 block mb-1">Quantity (number of shares)</label>
               <input id="shareQty" type="number" step="0.001" min="0" placeholder="e.g. 100" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
             </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="text-xs text-slate-400 block mb-1">Purchased At (per share)</label>
+                <input id="sharePurchasePrice" type="number" step="0.0001" min="0" placeholder="e.g. 12.50" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-400 block mb-1">Purchase Currency</label>
+                <select id="sharePurchasePriceCurrency" disabled class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-300">
+                  <option value="AED">AED – UAE Dirham</option>
+                  <option value="INR">INR – Indian Rupee</option>
+                  <option value="USD">USD – US Dollar</option>
+                </select>
+              </div>
+            </div>
             <p class="text-xs text-slate-500">Price is auto-fetched from the configured exchange source on save. Use ↻ Refresh on the asset card to update anytime.</p>
           </div>
 
@@ -372,14 +394,6 @@
                 <input id="loanTenure" type="number" step="1" min="0" placeholder="e.g. 240" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
               </div>
             </div>
-            <div>
-              <label class="text-xs text-slate-400 block mb-1">Loan Currency</label>
-              <select id="loanAmountCurrency" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500">
-                <option value="AED">AED – UAE Dirham</option>
-                <option value="INR">INR – Indian Rupee</option>
-                <option value="USD">USD – US Dollar</option>
-              </select>
-            </div>
             <div class="grid grid-cols-2 gap-3">
               <div>
                 <label class="text-xs text-slate-400 block mb-1">Monthly EMI</label>
@@ -394,7 +408,7 @@
         </div>
         <div class="flex gap-3 mt-6">
           <button onclick="closeModal('accountModal')" class="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded-lg text-sm transition-colors">Cancel</button>
-          <button onclick="saveAccount()" class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-2 rounded-lg text-sm font-medium transition-colors">Save</button>
+          <button id="accountSaveBtn" onclick="saveAccount()" class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-2 rounded-lg text-sm font-medium transition-colors">Save</button>
         </div>
       </div>
     </div>
@@ -446,7 +460,7 @@
             <div>
               <label class="text-xs text-slate-400 block mb-1">Balance Amount *</label>
               <div class="flex gap-1.5">
-                <select id="entAmountCurrency" class="bg-slate-700 border border-slate-600 rounded-lg px-2 py-2 text-sm focus:outline-none focus:border-indigo-500 w-20 shrink-0">
+                <select id="entAmountCurrency" disabled class="bg-slate-700 border border-slate-600 rounded-lg px-2 py-2 text-sm focus:outline-none focus:border-indigo-500 w-20 shrink-0 text-slate-300">
                   <option value="AED">AED</option>
                   <option value="INR">INR</option>
                   <option value="USD">USD</option>
@@ -532,14 +546,14 @@
 
           <div id="txnFromRow">
             <label class="text-xs text-slate-400 block mb-1" id="txnFromLabel">From Account *</label>
-            <select id="txnFrom" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500">
+            <select id="txnFrom" onchange="onTransactionAccountChange()" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500">
               <option value="">— select account —</option>
             </select>
           </div>
 
           <div id="txnToRow">
             <label class="text-xs text-slate-400 block mb-1" id="txnToLabel">To Account *</label>
-            <select id="txnTo" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500">
+            <select id="txnTo" onchange="onTransactionAccountChange()" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500">
               <option value="">— select account —</option>
             </select>
           </div>
@@ -552,13 +566,22 @@
           <div>
             <label class="text-xs text-slate-400 block mb-1">Amount *</label>
             <div class="flex gap-1.5">
-              <select id="txnAmountCurrency" class="bg-slate-700 border border-slate-600 rounded-lg px-2 py-2 text-sm focus:outline-none focus:border-indigo-500 w-20 shrink-0">
+              <select id="txnAmountCurrency" disabled class="bg-slate-700 border border-slate-600 rounded-lg px-2 py-2 text-sm focus:outline-none focus:border-indigo-500 w-20 shrink-0 text-slate-300">
                 <option value="AED">AED</option>
                 <option value="INR">INR</option>
                 <option value="USD">USD</option>
               </select>
-              <input id="txnAmount" type="number" step="0.01" min="0.01" placeholder="0.00" class="flex-1 min-w-0 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+              <input id="txnAmount" type="number" step="0.01" min="0.01" placeholder="0.00" oninput="updateTransactionFxPreview()" class="flex-1 min-w-0 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
             </div>
+          </div>
+
+          <div id="txnFxSection" class="hidden space-y-2 border border-slate-700 rounded-xl p-3 bg-slate-900/40">
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">FX Rate</label>
+              <input id="txnFxRate" type="number" min="0.000001" step="0.000001" placeholder="0.000000" oninput="updateTransactionFxPreview()" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+            </div>
+            <p id="txnFxHint" class="text-xs text-slate-500"></p>
+            <p id="txnFxPreview" class="text-xs text-slate-300"></p>
           </div>
 
           <div>
