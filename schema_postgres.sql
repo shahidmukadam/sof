@@ -5,10 +5,11 @@ CREATE TABLE IF NOT EXISTS families (
 );
 
 CREATE TABLE IF NOT EXISTS users (
-    id          BIGSERIAL PRIMARY KEY,
-    family_id   BIGINT REFERENCES families(id),
-    name        TEXT NOT NULL UNIQUE,
-    created_at  TEXT NOT NULL DEFAULT to_char(timezone('utc', now()), 'YYYY-MM-DD"T"HH24:MI:SS')
+    id               BIGSERIAL PRIMARY KEY,
+    family_id        BIGINT REFERENCES families(id),
+    name             TEXT NOT NULL UNIQUE,
+    default_currency TEXT NOT NULL DEFAULT 'AED',
+    created_at       TEXT NOT NULL DEFAULT to_char(timezone('utc', now()), 'YYYY-MM-DD"T"HH24:MI:SS')
 );
 
 CREATE TABLE IF NOT EXISTS auth_accounts (

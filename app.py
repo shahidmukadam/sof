@@ -668,6 +668,10 @@ def migrate_db():
                 ALTER TABLE transactions
                 ADD COLUMN IF NOT EXISTS fx_rate DOUBLE PRECISION
             """)
+            conn.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS default_currency TEXT NOT NULL DEFAULT 'AED'
+            """)
             conn.commit()
         finally:
             conn.close()
