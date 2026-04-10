@@ -4,10 +4,15 @@ const state = {
   buckets: [],
   bucketSummary: [],
   transactions: [],
+  collapsedAssetSections: {},
   editingAccountId: null,
   editingBucketId: null,
   allocatingBucketId: null,
   manualAllocateContext: null,
+  expandedAccounts: {},
+  accountActivity: {},
+  accountActivityLoading: {},
+  accountActivityError: {},
   selectedScope: 'me',
   currency: 'AED',
   rates: { AED: 3.6725, INR: 83.5 },
@@ -994,6 +999,344 @@ async function loadAccounts() {
   renderAccounts();
 }
 
+function compactAssetSubtitle(account, readOnly = false) {
+  const parts = [];
+  if (account.institution) {
+    parts.push(account.institution);
+  } else if (account.type === 'shares' && account.stock_name) {
+    parts.push(account.stock_name);
+  }
+  if (readOnly && account.user_name) {
+    parts.push(`Merged across ${account.user_name}`);
+  }
+  return parts.join(' · ');
+}
+
+function accountBalancePresentation(account) {
+  if (account.type === 'loan' && account.remaining_principal != null) {
+    return {
+      label: 'outstanding',
+      className: 'text-orange-300',
+      value: moneyFromStored(
+        Math.abs(account.remaining_principal),
+        account.currency,
+        account.remaining_principal_usd != null ? Math.abs(account.remaining_principal_usd) : null,
+      ),
+    };
+  }
+  if (account.type === 'shares' && account.latest_balance != null) {
+    return {
+      label: 'market value',
+      className: 'text-indigo-300',
+      value: moneyFromStored(account.latest_balance, account.currency, account.latest_balance_usd),
+    };
+  }
+  if (account.latest_balance != null) {
+    return {
+      label: 'balance',
+      className: account.latest_balance < 0 ? 'text-rose-300' : 'text-emerald-300',
+      value: moneyFromStored(account.latest_balance, account.currency, account.latest_balance_usd),
+    };
+  }
+  return {
+    label: account.type === 'shares' ? 'market value' : 'balance',
+    className: 'text-slate-300',
+    value: '—',
+  };
+}
+
+function accountSectionTotalUsd(account) {
+  if (account.type === 'loan' && account.remaining_principal != null) {
+    if (account.remaining_principal_usd != null) return Math.abs(account.remaining_principal_usd);
+    return Math.abs(toUSDWithCurrency(account.remaining_principal, account.currency || 'USD'));
+  }
+  if (account.type === 'shares' && account.latest_balance != null) {
+    if (account.latest_balance_usd != null) return account.latest_balance_usd;
+    return toUSDWithCurrency(account.latest_balance, account.currency || 'USD');
+  }
+  if (account.latest_balance != null) {
+    if (account.latest_balance_usd != null) return account.latest_balance_usd;
+    return toUSDWithCurrency(account.latest_balance, account.currency || 'USD');
+  }
+  return 0;
+}
+
+function assetSectionSummary(sectionType, accounts) {
+  const totalUsd = accounts.reduce((sum, account) => sum + accountSectionTotalUsd(account), 0);
+  const labelMap = {
+    bank: 'Total balance',
+    investment_group: 'Total balance',
+    shares: 'Total market value',
+    loan: 'Total outstanding',
+  };
+  const classMap = {
+    bank: 'text-emerald-300',
+    investment_group: 'text-blue-300',
+    shares: 'text-indigo-300',
+    loan: 'text-orange-300',
+  };
+  return {
+    label: labelMap[sectionType] || 'Total',
+    className: classMap[sectionType] || 'text-slate-200',
+    value: money(totalUsd),
+  };
+}
+
+function formatAccountTransactionPreview(txn, accountId) {
+  const accountNum = Number(accountId);
+  const isSource = Number(txn.from_account_id) === accountNum;
+  const isDestination = Number(txn.to_account_id) === accountNum;
+
+  let amount = txn.amount;
+  let currency = 'USD';
+  let direction = 'in';
+  let title = txn.counterparty || 'External';
+
+  if (txn.txn_type === 'credit') {
+    amount = txn.destination_amount ?? txn.amount;
+    currency = txn.destination_currency || 'USD';
+    direction = 'in';
+    title = txn.counterparty ? `From ${txn.counterparty}` : 'Incoming credit';
+  } else if (txn.txn_type === 'debit') {
+    amount = txn.source_amount ?? txn.amount;
+    currency = txn.source_currency || 'USD';
+    direction = 'out';
+    title = txn.counterparty ? `To ${txn.counterparty}` : 'Outgoing debit';
+  } else if (isSource) {
+    amount = txn.source_amount ?? txn.amount;
+    currency = txn.source_currency || 'USD';
+    direction = 'out';
+    title = `Transfer to ${txn.to_account_name || 'account'}`;
+  } else if (isDestination) {
+    amount = txn.destination_amount ?? txn.amount;
+    currency = txn.destination_currency || 'USD';
+    direction = 'in';
+    title = `Transfer from ${txn.from_account_name || 'account'}`;
+  }
+
+  return {
+    className: direction === 'out' ? 'text-rose-300' : 'text-emerald-300',
+    amountText: `${direction === 'out' ? '−' : '+'}${moneyInCurrency(amount, currency)}`,
+    title,
+  };
+}
+
+function renderExpandedAssetDetails(account, { readOnly = false, accountKey, numericAccountId }) {
+  const isLoan = account.type === 'loan';
+  const isShares = account.type === 'shares';
+  const isBank = account.type === 'bank' && Number.isFinite(numericAccountId);
+  if (!isLoan && !isShares && !isBank) {
+    return '';
+  }
+
+  if (isBank) {
+    const preview = state.accountActivity[accountKey] || [];
+    const isLoading = !!state.accountActivityLoading[accountKey];
+    const error = state.accountActivityError[accountKey];
+    const activityHtml = isLoading
+      ? '<p class="text-sm text-slate-400">Loading recent transactions...</p>'
+      : error
+        ? `<p class="text-sm text-rose-300">${escapeHtml(error)}</p>`
+        : preview.length
+          ? preview.map(txn => {
+              const row = formatAccountTransactionPreview(txn, numericAccountId);
+              const noteHtml = txn.note ? `<p class="text-[11px] text-slate-500 truncate">${escapeHtml(txn.note)}</p>` : '';
+              return `
+                <div class="flex items-center justify-between gap-3 rounded-lg bg-slate-900/40 px-3 py-2">
+                  <div class="min-w-0">
+                    <p class="text-sm text-slate-200 truncate">${escapeHtml(row.title)}</p>
+                    ${noteHtml}
+                  </div>
+                  <div class="shrink-0 text-right">
+                    <p class="text-sm font-semibold ${row.className}">${escapeHtml(row.amountText)}</p>
+                    <p class="text-[11px] text-slate-500">${dateHtml(txn.recorded_at)}</p>
+                  </div>
+                </div>
+              `;
+            }).join('')
+          : '<p class="text-sm text-slate-400">No transactions yet. Balance updates still appear in History.</p>';
+
+    return `
+      <div class="border-t border-slate-700/80 bg-slate-950/40 px-5 py-4">
+        <div class="rounded-xl border border-slate-700/70 bg-slate-900/45 p-4 shadow-inner shadow-slate-950/30">
+          <div class="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <p class="text-[11px] uppercase tracking-[0.24em] text-emerald-300/80">Recent Transactions</p>
+              <p class="text-xs text-slate-500">Latest activity for this bank account.</p>
+            </div>
+            ${readOnly ? '' : `<button onclick="openAddEntry(${numericAccountId})" class="text-xs text-indigo-300 hover:text-white px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 transition-colors">+ Entry</button>`}
+          </div>
+          <div class="space-y-2">${activityHtml}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  if (isLoan) {
+    return `
+      <div class="border-t border-slate-700/80 bg-slate-950/40 px-5 py-4">
+        <div class="rounded-xl border border-orange-500/20 bg-orange-500/6 p-4 shadow-inner shadow-slate-950/30">
+          <div class="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <p class="text-[11px] uppercase tracking-[0.24em] text-orange-300/80">Loan Details</p>
+              <p class="text-xs text-slate-500">Expanded repayment information.</p>
+            </div>
+            ${readOnly ? '' : `<button id="emi-btn-${numericAccountId}" onclick="applyEmi(${numericAccountId})" class="text-xs text-orange-300 hover:text-white px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 transition-colors">Pay EMI</button>`}
+          </div>
+          <div class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm text-slate-300">
+            <div>Native Currency</div>
+            <div class="text-right text-orange-200">${escapeHtml(account.currency || 'USD')}</div>
+            <div>Interest Rate</div>
+            <div class="text-right text-orange-200">${escapeHtml(account.interest_rate ?? '—')}% p.a.</div>
+            <div>Remaining Tenure</div>
+            <div class="text-right text-orange-200">${escapeHtml(account.remaining_tenure ?? '—')} months</div>
+            <div>Monthly EMI</div>
+            <div class="text-right text-orange-200">${account.monthly_emi != null ? moneyFromStored(account.monthly_emi, account.currency, account.monthly_emi_usd) : '—'}</div>
+            <div>Outstanding Principal</div>
+            <div class="text-right text-orange-200">${account.remaining_principal != null ? moneyFromStored(account.remaining_principal, account.currency, account.remaining_principal_usd) : '—'}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  const profitClass = account.unrealized_gain_loss > 0
+    ? 'text-emerald-300'
+    : account.unrealized_gain_loss < 0
+      ? 'text-rose-300'
+      : 'text-slate-300';
+  const profitText = account.unrealized_gain_loss != null
+    ? signedMoneyFromStored(account.unrealized_gain_loss, account.currency || account.purchase_price_currency, account.unrealized_gain_loss_usd)
+    : '—';
+  const profitPct = account.unrealized_gain_loss_pct != null ? ` (${escapeHtml(signedPercent(account.unrealized_gain_loss_pct))})` : '';
+
+  return `
+    <div class="border-t border-slate-700/80 bg-slate-950/40 px-5 py-4">
+      <div class="rounded-xl border border-indigo-500/20 bg-indigo-500/6 p-4 shadow-inner shadow-slate-950/30">
+        <div class="mb-3 flex items-center justify-between gap-3">
+          <div>
+            <p class="text-[11px] uppercase tracking-[0.24em] text-indigo-300/80">Share Details</p>
+            <p class="text-xs text-slate-500">Holding and performance information.</p>
+          </div>
+          ${readOnly ? '' : `<button data-refresh="${numericAccountId}" onclick="refreshPrice(${numericAccountId})" class="text-xs text-indigo-300 hover:text-white px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 transition-colors">↻ Refresh Price</button>`}
+        </div>
+        <div class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm text-slate-300">
+          <div>Exchange</div>
+          <div class="text-right text-indigo-200">${escapeHtml(account.exchange || '—')}</div>
+          <div>Ticker</div>
+          <div class="text-right text-indigo-200">${escapeHtml(account.stock_code || '—')}</div>
+          <div>Quantity</div>
+          <div class="text-right text-indigo-200">${account.quantity != null ? escapeHtml(Number(account.quantity).toLocaleString()) : '—'} shares</div>
+          <div>Purchase Price</div>
+          <div class="text-right text-indigo-200">${account.purchase_price != null ? moneyFromStored(account.purchase_price, account.purchase_price_currency || shareExchangeCurrency(account.exchange), null, { maximumFractionDigits: 4 }) : '—'}</div>
+          <div>Cost Basis</div>
+          <div class="text-right text-indigo-200">${account.cost_basis_total != null ? moneyFromStored(account.cost_basis_total, account.currency || account.purchase_price_currency, account.cost_basis_total_usd) : '—'}</div>
+          <div>Current Price</div>
+          <div class="text-right text-indigo-200">${account.last_price != null ? moneyFromStored(account.last_price, account.last_price_currency || shareExchangeCurrency(account.exchange), null, { maximumFractionDigits: 4 }) : '—'}</div>
+          <div>P/L</div>
+          <div class="text-right ${profitClass}">${profitText}${profitPct}</div>
+          <div>Last Updated</div>
+          <div class="text-right text-indigo-200">${account.last_fetched ? dateHtml(account.last_fetched) : '—'}</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function loadAccountActivity(accountId, { force = false } = {}) {
+  const numericAccountId = Number(accountId);
+  if (!Number.isFinite(numericAccountId)) return;
+  const key = String(accountId);
+  if (!force && (state.accountActivityLoading[key] || state.accountActivity[key])) return;
+  state.accountActivityLoading[key] = true;
+  delete state.accountActivityError[key];
+  renderAccounts();
+  try {
+    state.accountActivity[key] = await api(withScopeQuery('/api/transactions', {
+      account_id: numericAccountId,
+      limit: 5,
+    }));
+  } catch (e) {
+    state.accountActivityError[key] = e.message || 'Could not load recent transactions.';
+    state.accountActivity[key] = [];
+  } finally {
+    state.accountActivityLoading[key] = false;
+    renderAccounts();
+  }
+}
+
+async function toggleAccountDetails(accountId) {
+  const key = String(accountId);
+  state.expandedAccounts[key] = !state.expandedAccounts[key];
+  renderAccounts();
+  if (!state.expandedAccounts[key]) return;
+  const account = state.accounts.find(item => String(item.id) === key);
+  if (account?.type === 'bank') {
+    await loadAccountActivity(accountId);
+  }
+}
+
+function toggleAssetSection(sectionType) {
+  state.collapsedAssetSections[sectionType] = !state.collapsedAssetSections[sectionType];
+  renderAccounts();
+}
+
+function renderAccountCard(account, { readOnly, typeColors }) {
+  const accountKey = String(account.id);
+  const accountId = Number(account.id);
+  const isLoan = account.type === 'loan';
+  const isShares = account.type === 'shares';
+  const balance = accountBalancePresentation(account);
+  const canExpand = !readOnly && (account.type === 'bank' || account.type === 'loan' || account.type === 'shares');
+  const isExpanded = canExpand && !!state.expandedAccounts[accountKey];
+  const subtitle = compactAssetSubtitle(account, readOnly);
+  const nativeCurrency = escapeHtml(account.currency || (isShares ? (account.purchase_price_currency || shareExchangeCurrency(account.exchange)) : 'Mixed'));
+  const accountName = escapeHtml(account.name);
+  const subtitleHtml = subtitle ? `<p class="mt-1 text-xs text-slate-400">${escapeHtml(subtitle)}</p>` : '';
+  const expandedHtml = isExpanded
+    ? renderExpandedAssetDetails(account, { readOnly, accountKey, numericAccountId: accountId })
+    : '';
+
+  return `
+    <div class="overflow-hidden rounded-2xl border border-slate-700/70 bg-slate-800 shadow-lg shadow-slate-950/20">
+      <div class="px-5 py-4">
+        <div class="flex items-start justify-between gap-4">
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-2 flex-wrap">
+              <p class="font-medium">${accountName}</p>
+              <span class="text-xs px-2 py-0.5 rounded-full ${typeColors[account.type] || 'bg-slate-500/20 text-slate-400'}">${escapeHtml(typeLabel(account.type))}</span>
+            </div>
+            ${subtitleHtml}
+            <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
+              <span>Native: <span class="text-slate-300">${nativeCurrency}</span></span>
+              ${account.type === 'shares' && account.stock_code ? `<span>Ticker: <span class="text-slate-300">${escapeHtml(account.stock_code)}</span></span>` : ''}
+              ${account.type === 'loan' && account.remaining_tenure != null ? `<span>Tenure: <span class="text-slate-300">${escapeHtml(account.remaining_tenure)} mo</span></span>` : ''}
+            </div>
+          </div>
+          <div class="shrink-0 text-right">
+            <p class="text-sm font-semibold ${balance.className}">${balance.value}</p>
+            <p class="text-xs text-slate-500">${escapeHtml(balance.label)}</p>
+          </div>
+        </div>
+      </div>
+      <div class="flex flex-wrap items-center justify-between gap-3 border-t border-slate-700/70 bg-slate-900/35 px-5 py-3">
+        <div class="text-[11px] uppercase tracking-[0.2em] text-slate-500">
+          ${canExpand ? (isExpanded ? 'Expanded details' : 'Compact overview') : 'Compact overview'}
+        </div>
+        ${readOnly ? `
+          <div class="text-xs text-slate-500 px-3 py-1.5 rounded-lg bg-slate-900/50 border border-slate-700/70">View only</div>` : `
+          <div class="flex flex-wrap items-center gap-2">
+            <button onclick="viewHistory(${accountId})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">History</button>
+            ${canExpand ? `<button onclick='toggleAccountDetails(${JSON.stringify(accountKey)})' class="text-xs text-slate-300 hover:text-white px-3 py-1.5 rounded-lg bg-slate-700/80 hover:bg-slate-700 transition-colors">${isExpanded ? 'Hide details' : 'Details'}</button>` : ''}
+            <button onclick="openAccountModal(${accountId})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Edit</button>
+            <button onclick="deleteAccount(${accountId})" class="text-xs text-rose-400 hover:text-rose-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Delete</button>
+          </div>`}
+      </div>
+      ${expandedHtml}
+    </div>
+  `;
+}
+
 function renderAccounts() {
   const list = document.getElementById('accountsList');
   const empty = document.getElementById('accountsEmpty');
@@ -1010,114 +1353,52 @@ function renderAccounts() {
     shares: 'bg-indigo-500/20 text-indigo-400',
     investment_group: 'bg-blue-500/20 text-blue-400',
   };
-  list.innerHTML = state.accounts.map(a => {
-    const accountId = Number(a.id);
-    const isLoan = a.type === 'loan';
-    const isShares = a.type === 'shares';
-    const nativeCurrencyLabel = escapeHtml(a.currency || (isShares ? (a.purchase_price_currency || shareExchangeCurrency(a.exchange)) : 'Mixed'));
-    const metaLineParts = readOnly
-      ? [
-          a.institution || (isShares && a.stock_name ? a.stock_name : ''),
-          a.user_name ? `Merged across ${a.user_name}` : '',
-        ]
-      : [a.institution || (isShares && a.stock_name ? a.stock_name : '')];
-    if (!isLoan && !isShares) {
-      metaLineParts.push(`Native: ${a.currency || 'Mixed'}`);
-    }
-    const metaLine = metaLineParts.filter(Boolean).join(' · ');
-    const accountName = escapeHtml(a.name);
-    const metaLineHtml = escapeHtml(metaLine);
-    const exchangeHtml = escapeHtml(a.exchange || '—');
-    const stockCodeHtml = escapeHtml(a.stock_code || '—');
-    const priceHtml = a.last_price != null
-      ? escapeHtml(moneyFromStored(a.last_price, a.last_price_currency || shareExchangeCurrency(a.exchange), null, { maximumFractionDigits: 4 }))
-      : 'Not fetched yet';
-    const purchasePriceHtml = a.purchase_price != null
-      ? escapeHtml(moneyFromStored(a.purchase_price, a.purchase_price_currency || shareExchangeCurrency(a.exchange), null, { maximumFractionDigits: 4 }))
-      : '—';
-    const profitClass = a.unrealized_gain_loss > 0
-      ? 'text-emerald-300'
-      : a.unrealized_gain_loss < 0
-        ? 'text-rose-300'
-        : 'text-slate-300';
-    const profitText = a.unrealized_gain_loss != null
-      ? signedMoneyFromStored(a.unrealized_gain_loss, a.currency || a.purchase_price_currency, a.unrealized_gain_loss_usd)
-      : '—';
-    const profitPct = a.unrealized_gain_loss_pct != null ? signedPercent(a.unrealized_gain_loss_pct) : '';
+  const sections = [
+    { type: 'bank', title: 'Bank Accounts', accent: 'text-emerald-300' },
+    { type: 'shares', title: 'Shares', accent: 'text-indigo-300' },
+    { type: 'investment_group', title: 'Investment Accounts', accent: 'text-blue-300' },
+    { type: 'loan', title: 'Loans', accent: 'text-orange-300' },
+  ];
 
-    const loanMeta = isLoan ? `
-      <div class="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-400">
-        <span>Native: <span class="text-orange-300">${nativeCurrencyLabel}</span></span>
-        <span>Rate: <span class="text-orange-300">${a.interest_rate ?? '—'}% p.a.</span></span>
-        <span>Tenure: <span class="text-orange-300">${a.remaining_tenure ?? '—'} mo</span></span>
-        <span>EMI: <span class="text-orange-300">${a.monthly_emi != null ? moneyFromStored(a.monthly_emi, a.currency, a.monthly_emi_usd) : '—'}</span></span>
-        <span>Principal: <span class="text-orange-300">${a.remaining_principal != null ? moneyFromStored(a.remaining_principal, a.currency, a.remaining_principal_usd) : '—'}</span></span>
-      </div>` : '';
-
-    const sharesMeta = isShares ? `
-      <div class="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-400">
-        <span>Exchange: <span class="text-indigo-300">${exchangeHtml}</span></span>
-        <span>Ticker: <span class="text-indigo-300">${stockCodeHtml}</span></span>
-        <span>Qty: <span class="text-indigo-300">${a.quantity != null ? Number(a.quantity).toLocaleString() : '—'} shares</span></span>
-        <span>Native: <span class="text-indigo-300">${nativeCurrencyLabel}</span></span>
-        <span>Price: <span class="text-indigo-300">${priceHtml}</span></span>
-        <span>Bought at: <span class="text-indigo-300">${purchasePriceHtml}</span></span>
-        <span>Cost basis: <span class="text-slate-200">${a.cost_basis_total != null ? moneyFromStored(a.cost_basis_total, a.currency || a.purchase_price_currency, a.cost_basis_total_usd) : '—'}</span></span>
-        <span class="col-span-2">P/L: <span class="${profitClass}">${profitText}</span>${profitPct ? `<span class="ml-1 text-slate-500">(${escapeHtml(profitPct)})</span>` : ''}</span>
-        ${a.last_fetched ? `<span class="col-span-2 text-slate-500">Updated: ${dateHtml(a.last_fetched)}</span>` : ''}
-      </div>` : '';
-
-    const cardBorder = isLoan ? 'border border-orange-500/20' : isShares ? 'border border-indigo-500/20' : '';
-
-    // Balance display
-    let balanceHtml = '';
-    if (isShares && a.latest_balance != null) {
-      balanceHtml = `<div class="text-right">
-        <p class="text-sm font-semibold text-indigo-300">${moneyFromStored(a.latest_balance, a.currency, a.latest_balance_usd)}</p>
-        <p class="text-xs text-slate-500">market value</p>
-        ${a.unrealized_gain_loss != null ? `<p class="text-xs ${profitClass}">${profitText}${profitPct ? ` (${escapeHtml(profitPct)})` : ''}</p>` : ''}
-      </div>`;
-    } else if (isLoan && a.remaining_principal != null) {
-      balanceHtml = `<div class="text-right">
-        <p class="text-sm font-semibold text-orange-300">${moneyFromStored(Math.abs(a.remaining_principal), a.currency, a.remaining_principal_usd != null ? Math.abs(a.remaining_principal_usd) : null)}</p>
-        <p class="text-xs text-slate-500">outstanding</p>
-      </div>`;
-    } else if (a.latest_balance != null) {
-      const balColor = a.latest_balance < 0 ? 'text-rose-300' : 'text-emerald-300';
-      balanceHtml = `<div class="text-right">
-        <p class="text-sm font-semibold ${balColor}">${moneyFromStored(a.latest_balance, a.currency, a.latest_balance_usd)}</p>
-        <p class="text-xs text-slate-500">balance</p>
-      </div>`;
-    }
-
-    return `
-      <div class="bg-slate-800 rounded-xl px-5 py-4 ${cardBorder}">
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-3">
+  list.innerHTML = sections
+    .map(section => {
+      const accounts = state.accounts.filter(account => account.type === section.type);
+      if (!accounts.length) return '';
+      const isCollapsed = !!state.collapsedAssetSections[section.type];
+      const summary = assetSectionSummary(section.type, accounts);
+      const cards = accounts
+        .map(account => renderAccountCard(account, { readOnly, typeColors }))
+        .join('');
+      const countLabel = `${accounts.length} ${accounts.length === 1 ? 'account' : 'accounts'}`;
+      return `
+        <section class="overflow-hidden rounded-2xl border border-slate-700/70 bg-slate-900/35 shadow-lg shadow-slate-950/20">
+          <button
+            type="button"
+            onclick='toggleAssetSection(${JSON.stringify(section.type)})'
+            class="w-full flex items-center justify-between gap-3 px-4 py-4 text-left transition-colors ${isCollapsed ? 'bg-slate-800/78 hover:bg-slate-800/95' : 'border-b border-slate-700/80 bg-slate-800/95'}"
+            aria-expanded="${isCollapsed ? 'false' : 'true'}"
+          >
             <div>
-              <p class="font-medium">${accountName}</p>
-              <p class="text-xs text-slate-400">${metaLineHtml}</p>
+              <h3 class="text-sm font-semibold uppercase tracking-[0.24em] ${section.accent}">${escapeHtml(section.title)}</h3>
+              <p class="text-xs text-slate-500">${countLabel}</p>
             </div>
-            <span class="text-xs px-2 py-0.5 rounded-full ${typeColors[a.type] || 'bg-slate-500/20 text-slate-400'}">${escapeHtml(typeLabel(a.type))}</span>
-          </div>
-          <div class="flex items-center gap-3">
-            ${balanceHtml}
-            ${readOnly ? `
-            <div class="text-xs text-slate-500 px-3 py-1.5 rounded-lg bg-slate-900/40 border border-slate-700/70">View only</div>` : `
-            <div class="flex items-center gap-2">
-              <button onclick="viewHistory(${accountId})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">History</button>
-              ${isShares ? `<button data-refresh="${accountId}" onclick="refreshPrice(${accountId})" class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">↻ Price</button>` : ''}
-              ${isLoan ? `<button id="emi-btn-${accountId}" onclick="applyEmi(${accountId})" class="text-xs text-orange-400 hover:text-orange-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Pay EMI</button>` : ''}
-              ${(!isLoan && !isShares) ? `<button onclick="openAddEntry(${accountId})" class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">+ Entry</button>` : ''}
-              <button onclick="openAccountModal(${accountId})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Edit</button>
-              <button onclick="deleteAccount(${accountId})" class="text-xs text-rose-400 hover:text-rose-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Delete</button>
-            </div>`}
-          </div>
-        </div>
-        ${loanMeta}${sharesMeta}
-      </div>
-    `;
-  }).join('');
+            <div class="flex items-center gap-3">
+              ${isCollapsed ? `
+                <div class="text-right">
+                  <p class="text-sm font-semibold ${summary.className}">${summary.value}</p>
+                  <p class="text-[11px] text-slate-500">${escapeHtml(summary.label)}</p>
+                </div>
+              ` : ''}
+              <span class="text-xs text-slate-500">${isCollapsed ? 'Expand' : 'Collapse'}</span>
+              <span class="text-lg leading-none text-slate-400">${isCollapsed ? '&#9656;' : '&#9662;'}</span>
+            </div>
+          </button>
+          ${isCollapsed ? '' : `<div class="bg-slate-950/45 px-3 py-3"><div class="space-y-2">${cards}</div></div>`}
+        </section>
+      `;
+    })
+    .filter(Boolean)
+    .join('');
 }
 
 function onAccTypeChange() {

@@ -3303,12 +3303,28 @@ def list_transactions():
     db = get_db()
     where = []
     params = []
+    account_id = request.args.get('account_id')
+    limit_raw = request.args.get('limit')
     if user_id is not None:
         where.append("t.user_id = ?")
         params.append(user_id)
     elif family_id is not None:
         where.append("t.user_id IN (SELECT id FROM users WHERE family_id = ?)")
         params.append(family_id)
+
+    if account_id not in (None, ''):
+        try:
+            account_id = int(account_id)
+        except (TypeError, ValueError):
+            return _json_error('Invalid account ID', 400)
+        where.append("(t.from_account_id = ? OR t.to_account_id = ?)")
+        params.extend([account_id, account_id])
+
+    try:
+        limit = int(limit_raw or 200)
+    except (TypeError, ValueError):
+        return _json_error('Invalid limit', 400)
+    limit = max(1, min(limit, 200))
 
     query = """
         SELECT t.*,
@@ -3322,7 +3338,7 @@ def list_transactions():
     """
     if where:
         query += " WHERE " + " AND ".join(where)
-    query += " ORDER BY t.recorded_at DESC, t.id DESC LIMIT 200"
+    query += f" ORDER BY t.recorded_at DESC, t.id DESC LIMIT {limit}"
     rows = db.execute(query, params).fetchall()
     return jsonify(_serialize_transaction_rows(rows))
 

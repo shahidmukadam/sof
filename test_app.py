@@ -1266,6 +1266,21 @@ class TestTransactions(_Base):
         txns = self._j(self._get('/api/transactions'))
         self.assertGreaterEqual(txns[0]['id'], txns[1]['id'])
 
+    def test_list_transactions_can_filter_by_account_id(self):
+        bank = self._bank()
+        inv = self._investment()
+        other = self._bank('Secondary Bank')
+        self._txn('credit', 100, to_id=bank['id'], counterparty='Salary')
+        self._entry(inv['id'], 0)
+        self._txn('intra', 50, from_id=bank['id'], to_id=inv['id'])
+        self._txn('credit', 75, to_id=other['id'], counterparty='Bonus')
+        txns = self._j(self._get(f'/api/transactions?account_id={bank["id"]}&limit=5'))
+        self.assertEqual(2, len(txns))
+        self.assertTrue(all(
+            txn['from_account_id'] == bank['id'] or txn['to_account_id'] == bank['id']
+            for txn in txns
+        ))
+
     def test_delete_transaction_removes_it_from_list(self):
         bank = self._bank()
         txn = self._j(self._txn('credit', 100, to_id=bank['id'], counterparty='C'))
