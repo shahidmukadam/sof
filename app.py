@@ -165,8 +165,20 @@ app = Flask(__name__)
 app.secret_key = _load_secret_key()
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = os.environ.get('SESSION_COOKIE_SECURE', '').lower() in ('1', 'true', 'yes')
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 31536000  # 1 year cache for static files
 app.permanent_session_lifetime = timedelta(days=180)
 application = app
+
+
+@app.after_request
+def set_security_headers(response):
+    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
+    return response
 
 # Yahoo Finance suffix + native currency per exchange
 EXCHANGE_MAP = {
@@ -3422,6 +3434,7 @@ def delete_transaction(tid):
 # Exchange Rates
 
 @app.route('/api/rates', methods=['GET'])
+@login_required
 def exchange_rates():
     try:
         url = 'https://open.er-api.com/v6/latest/USD'

@@ -1,9 +1,3 @@
-databases:
-  - name: state-of-finance-db
-    plan: free
-    databaseName: sof
-    user: sof
-
 services:
   - type: web
     runtime: python
@@ -14,8 +8,8 @@ services:
     healthCheckPath: /healthz
     envVars:
       - key: DATABASE_URL
-        fromDatabase:
-          name: state-of-finance-db
-          property: connectionString
+        sync: false           # Set manually in Render dashboard — paste your Neon connection string
       - key: SOF_SECRET_KEY
         generateValue: true
+      - key: SESSION_COOKIE_SECURE
+        value: "true"
