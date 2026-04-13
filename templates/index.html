@@ -189,7 +189,7 @@
         <button id="mainAddEntryBtn" onclick="openAddEntry()" class="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
           + Add Balance Entry
         </button>
-        <button onclick="startOnboarding()" title="Take a guided tour" class="bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white w-9 h-9 rounded-lg text-sm font-bold transition-colors flex items-center justify-center">?</button>
+        <button id="tourReplayBtn" onclick="startOnboarding()" title="Take a guided tour" class="bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white w-9 h-9 rounded-lg text-sm font-bold transition-colors flex items-center justify-center">?</button>
         <button id="logoutBtn" onclick="logout()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-4 py-2 rounded-lg text-sm transition-colors">
           Logout
         </button>
@@ -218,7 +218,7 @@
                 <p id="unallocatedCashTotal" class="text-lg font-semibold text-emerald-300">—</p>
               </div>
             </div>
-            <div class="mt-4 grid grid-cols-2 gap-3" id="byTypeBreakdown"></div>
+            <div class="mt-4 grid grid-cols-2 gap-3 min-h-[3rem]" id="byTypeBreakdown"></div>
           </div>
           <div class="bg-slate-800 rounded-xl p-5 flex flex-col">
             <p class="text-slate-400 text-sm mb-3">By Asset Type</p>
@@ -230,13 +230,13 @@
 
         <div class="bg-slate-800 rounded-xl p-5 mb-6">
           <h2 class="text-sm font-medium text-slate-400 mb-4">Bucket Allocations</h2>
-          <div id="bucketSummary" class="space-y-3"></div>
+          <div id="bucketSummary" class="space-y-3 min-h-[3rem]"></div>
           <p id="bucketEmpty" class="text-slate-500 text-sm hidden">No buckets yet. <button class="text-indigo-400 underline" onclick="switchTab('buckets')">Add one</button></p>
         </div>
 
         <div class="bg-slate-800 rounded-xl p-5">
           <h2 class="text-sm font-medium text-slate-400 mb-4">Recent Entries</h2>
-          <div id="recentEntries" class="space-y-2"></div>
+          <div id="recentEntries" class="space-y-2 min-h-[3rem]"></div>
           <p id="recentEmpty" class="text-slate-500 text-sm hidden">No entries yet. Click "Add Balance Entry" to get started.</p>
         </div>
       </section>
@@ -246,7 +246,7 @@
           <h2 class="text-lg font-semibold">Assets</h2>
           <button id="addAssetBtn" onclick="openAccountModal()" class="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm transition-colors">+ Add Asset</button>
         </div>
-        <div id="accountsList" class="space-y-2"></div>
+        <div id="accountsList" class="space-y-2 min-h-[3rem]"></div>
         <p id="accountsEmpty" class="text-slate-500 text-sm hidden">No assets yet. Add one to get started.</p>
       </section>
 
@@ -258,12 +258,12 @@
             <button id="addBucketBtn" onclick="openBucketModal()" class="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm transition-colors">+ Add Bucket</button>
           </div>
         </div>
-        <div id="bucketsList" class="space-y-2"></div>
+        <div id="bucketsList" class="space-y-2 min-h-[3rem]"></div>
         <p id="bucketsEmpty" class="text-slate-500 text-sm hidden">No buckets yet. Buckets let you allocate your money to goals like Emergency Fund or Vacation.</p>
       </section>
 
       <section id="tab-timeline" class="hidden">
-        <div class="bg-slate-800 rounded-xl p-5 mb-4">
+        <div id="timelineFiltersCard" class="bg-slate-800 rounded-xl p-5 mb-4">
           <div class="flex flex-wrap gap-3 items-center">
             <div>
               <label class="text-xs text-slate-400 block mb-1">Interval</label>
@@ -300,7 +300,7 @@
           <h2 class="text-lg font-semibold">Transactions</h2>
           <button id="addTransactionBtn" onclick="openTransactionModal()" class="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm transition-colors">+ New Transaction</button>
         </div>
-        <div id="transactionsList" class="space-y-2"></div>
+        <div id="transactionsList" class="space-y-2 min-h-[3rem]"></div>
         <p id="transactionsEmpty" class="text-slate-500 text-sm hidden">No transactions yet. Click "New Transaction" to record a credit, debit, or transfer.</p>
       </section>
     </main>
