@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import http.cookiejar
 import json as _json
@@ -5,6 +6,7 @@ import os
 import re
 import secrets
 import sqlite3
+import sys
 import urllib.request
 from datetime import datetime, timedelta
 from functools import wraps
@@ -19,8 +21,25 @@ except ImportError:
     psycopg = None
     pg_dict_row = None
 
-APP_DIR = os.path.dirname(__file__)
-DATA_DIR = os.environ.get('SOF_DATA_DIR', APP_DIR)
+SOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _resource_dir():
+    return getattr(sys, '_MEIPASS', SOURCE_DIR)
+
+
+def _default_data_dir():
+    if getattr(sys, 'frozen', False):
+        if os.name == 'nt':
+            base = os.environ.get('LOCALAPPDATA') or os.path.expanduser(r'~\AppData\Local')
+            return os.path.join(base, 'State of Finance')
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return SOURCE_DIR
+
+
+RESOURCE_DIR = _resource_dir()
+APP_DIR = RESOURCE_DIR
+DATA_DIR = os.environ.get('SOF_DATA_DIR', _default_data_dir())
 DB_PATH = os.environ.get('SOF_DB_PATH', os.path.join(DATA_DIR, 'finance.db'))
 SECRET_KEY_PATH = os.environ.get('SOF_SECRET_KEY_PATH', os.path.join(DATA_DIR, 'secret.key'))
 DATABASE_URL = os.environ.get('DATABASE_URL') or os.environ.get('SOF_DATABASE_URL') or ''
@@ -161,7 +180,11 @@ def _load_secret_key():
     return key
 
 
-app = Flask(__name__)
+app = Flask(
+    __name__,
+    template_folder=os.path.join(RESOURCE_DIR, 'templates'),
+    static_folder=os.path.join(RESOURCE_DIR, 'static'),
+)
 app.secret_key = _load_secret_key()
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
@@ -190,7 +213,7 @@ EXCHANGE_MAP = {
 }
 ALLOWED_CURRENCIES = {'AED', 'INR', 'USD'}
 
-# Reusable full-account SELECT (includes loan + share details)
+# Reusable full-account SELECT (includes loan + share + metal details)
 _ACCOUNT_SELECT = """
     SELECT a.*,
            u.name AS user_name,
@@ -198,11 +221,13 @@ _ACCOUNT_SELECT = """
            sd.stock_name, sd.exchange, sd.stock_code, sd.quantity,
            sd.purchase_price, sd.purchase_price_currency,
            sd.last_price, sd.last_price_currency, sd.last_fetched,
+           md.metal_type, md.holding_type, md.quantity_grams,
            (SELECT be.amount FROM balance_entries be WHERE be.account_id = a.id ORDER BY be.id DESC LIMIT 1) AS latest_balance
     FROM accounts a
     JOIN users u ON u.id = a.user_id
     LEFT JOIN loan_details ld ON ld.account_id = a.id
     LEFT JOIN share_details sd ON sd.account_id = a.id
+    LEFT JOIN metal_details md ON md.account_id = a.id
 """
 
 
@@ -341,6 +366,12 @@ def _account_currency(account_row, fallback='USD'):
 
 def _serialize_balance_row(row, rates=None):
     data = dict(row)
+    # Decrypt encrypted fields
+    data['amount'] = _dec_num(data.get('amount'))
+    if data.get('note') is not None:
+        data['note'] = _dec(data.get('note'))
+    if data.get('account_name') is not None:
+        data['account_name'] = _dec(data.get('account_name'))
     account_currency = _normalize_currency(data.get('account_currency') or data.get('currency'), default='USD')
     native_amount = data.get('amount')
     data['amount_native'] = native_amount
@@ -361,6 +392,15 @@ def _serialize_balance_rows(rows):
 
 def _serialize_transaction_row(row, rates=None):
     data = dict(row)
+    # Decrypt encrypted text fields
+    if data.get('counterparty') is not None:
+        data['counterparty'] = _dec(data.get('counterparty'))
+    if data.get('note') is not None:
+        data['note'] = _dec(data.get('note'))
+    if data.get('from_account_name') is not None:
+        data['from_account_name'] = _dec(data.get('from_account_name'))
+    if data.get('to_account_name') is not None:
+        data['to_account_name'] = _dec(data.get('to_account_name'))
     if data.get('source_amount') is not None and data.get('source_currency'):
         data['source_amount_usd'] = _currency_to_usd(data['source_amount'], data['source_currency'], rates=rates)
     else:
@@ -401,8 +441,8 @@ def _convert_account_currency_storage(db, account_id, old_currency, new_currency
         (account_id,)
     ).fetchall()
     for row in balance_rows:
-        converted = _convert_currency_amount(row['amount'], normalized_old, normalized_new, rates=current_rates)
-        db.execute("UPDATE balance_entries SET amount=? WHERE id=?", (converted, row['id']))
+        converted = _convert_currency_amount(_dec_num(row['amount']), normalized_old, normalized_new, rates=current_rates)
+        db.execute("UPDATE balance_entries SET amount=? WHERE id=?", (_enc(converted), row['id']))
 
     if account_type == 'loan' and not skip_loan_details:
         loan = db.execute("""
@@ -445,12 +485,12 @@ def _revalue_share_from_cached_price(db, account_id, recorded_at=None):
     if recorded_at:
         db.execute(
             "INSERT INTO balance_entries (account_id, amount, note, recorded_at) VALUES (?,?,?,?)",
-            (account_id, valuation, note, recorded_at)
+            (account_id, _enc(valuation), _enc(note), recorded_at)
         )
     else:
         db.execute(
             "INSERT INTO balance_entries (account_id, amount, note) VALUES (?,?,?)",
-            (account_id, valuation, note)
+            (account_id, _enc(valuation), _enc(note))
         )
     return {
         'price': float(share['last_price']),
@@ -463,6 +503,12 @@ def _revalue_share_from_cached_price(db, account_id, recorded_at=None):
 
 def _serialize_account_row(row, rates=None):
     data = dict(row)
+    # Decrypt encrypted text/numeric fields
+    data['name'] = _dec(data.get('name'))
+    if data.get('institution') is not None:
+        data['institution'] = _dec(data.get('institution'))
+    if data.get('latest_balance') is not None:
+        data['latest_balance'] = _dec_num(data.get('latest_balance'))
     data['cost_basis_total'] = None
     data['cost_basis_total_usd'] = None
     data['unrealized_gain_loss'] = None
@@ -492,6 +538,10 @@ def _serialize_account_row(row, rates=None):
             data[usd_key] = _currency_to_usd(native_value, account_currency, rates=rates)
         else:
             data[usd_key] = None
+
+    if data.get('type') == 'metal':
+        # metal_type, holding_type, quantity_grams are already in the row
+        return data
 
     if data.get('type') != 'shares':
         return data
@@ -600,7 +650,7 @@ def close_db(exc):
 
 def init_db():
     schema_name = 'schema_postgres.sql' if DB_BACKEND == 'postgres' else 'schema.sql'
-    schema = os.path.join(APP_DIR, schema_name)
+    schema = os.path.join(RESOURCE_DIR, schema_name)
     with open(schema, 'r', encoding='utf-8') as f:
         script = f.read()
 
@@ -672,7 +722,50 @@ def migrate_db():
                 ALTER TABLE users
                 ADD COLUMN IF NOT EXISTS default_currency TEXT NOT NULL DEFAULT 'AED'
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS metal_details (
+                    id             BIGSERIAL PRIMARY KEY,
+                    account_id     BIGINT NOT NULL UNIQUE REFERENCES accounts(id) ON DELETE CASCADE,
+                    metal_type     TEXT NOT NULL CHECK(metal_type IN ('gold','silver')),
+                    holding_type   TEXT CHECK(holding_type IN ('jewellery','digital_gold','physical')),
+                    quantity_grams DOUBLE PRECISION NOT NULL DEFAULT 0
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS zakat_settings (
+                    id                   BIGSERIAL PRIMARY KEY,
+                    user_id              BIGINT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+                    hawl_date            TEXT,
+                    nisab_standard       TEXT NOT NULL DEFAULT 'gold',
+                    stocks_rate          DOUBLE PRECISION NOT NULL DEFAULT 0.25,
+                    gold_grams           DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    gold_jewellery_grams DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    silver_grams         DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    business_goods       DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    receivables          DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    pension              DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    created_at           TEXT NOT NULL DEFAULT to_char(timezone('utc', now()), 'YYYY-MM-DD"T"HH24:MI:SS'),
+                    updated_at           TEXT NOT NULL DEFAULT to_char(timezone('utc', now()), 'YYYY-MM-DD"T"HH24:MI:SS')
+                )
+            """)
+            # Change amount columns to TEXT for encrypted storage (idempotent)
+            try:
+                conn.execute("""
+                    ALTER TABLE balance_entries
+                    ALTER COLUMN amount TYPE TEXT USING amount::TEXT
+                """)
+            except Exception:
+                pass
+            try:
+                conn.execute("""
+                    ALTER TABLE bucket_allocations
+                    ALTER COLUMN amount TYPE TEXT USING amount::TEXT
+                """)
+            except Exception:
+                pass
             conn.commit()
+            # Encrypt existing plaintext data if key is set
+            _encrypt_existing_data_postgres(conn)
         finally:
             conn.close()
         return
@@ -1063,6 +1156,50 @@ def migrate_db():
                 "ALTER TABLE users ADD COLUMN default_currency TEXT NOT NULL DEFAULT 'AED'"
             )
 
+        # Migration 8: change balance_entries.amount and bucket_allocations.amount to TEXT
+        # for encrypted storage support (no-op if already TEXT).
+        # NOTE: FK enforcement is turned OFF for table rebuilds because SQLite 3.26+
+        # automatically updates FK references when a table is renamed, which would cause
+        # DROP TABLE on the old table to cascade-delete child rows.
+        be_type_row = conn.execute(
+            "SELECT type FROM pragma_table_info('balance_entries') WHERE name='amount'"
+        ).fetchone()
+        if be_type_row and str(be_type_row[0]).upper() not in ('TEXT',):
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute("ALTER TABLE balance_entries RENAME TO balance_entries_old")
+            conn.execute("""
+                CREATE TABLE balance_entries (
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id     INTEGER NOT NULL REFERENCES accounts(id),
+                    amount         TEXT NOT NULL DEFAULT '0',
+                    note           TEXT,
+                    recorded_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                    transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL
+                )
+            """)
+            conn.execute("INSERT INTO balance_entries SELECT id, account_id, CAST(amount AS TEXT), note, recorded_at, transaction_id FROM balance_entries_old")
+            conn.execute("DROP TABLE balance_entries_old")
+            conn.execute("PRAGMA foreign_keys = ON")
+
+        ba_type_row = conn.execute(
+            "SELECT type FROM pragma_table_info('bucket_allocations') WHERE name='amount'"
+        ).fetchone()
+        if ba_type_row and str(ba_type_row[0]).upper() not in ('TEXT',):
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute("ALTER TABLE bucket_allocations RENAME TO bucket_allocations_old")
+            conn.execute("""
+                CREATE TABLE bucket_allocations (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    balance_entry_id INTEGER NOT NULL REFERENCES balance_entries(id) ON DELETE CASCADE,
+                    bucket_id        INTEGER NOT NULL REFERENCES buckets(id) ON DELETE CASCADE,
+                    amount           TEXT NOT NULL,
+                    UNIQUE(balance_entry_id, bucket_id)
+                )
+            """)
+            conn.execute("INSERT INTO bucket_allocations SELECT id, balance_entry_id, bucket_id, CAST(amount AS TEXT) FROM bucket_allocations_old")
+            conn.execute("DROP TABLE bucket_allocations_old")
+            conn.execute("PRAGMA foreign_keys = ON")
+
         # Migration 7: performance indexes
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_be_account_id
@@ -1093,7 +1230,126 @@ def migrate_db():
             ON transactions (user_id, recorded_at DESC)
         """)
 
+        # Migration 10: add 'metal' to accounts type CHECK and metal_details table
+        acc_type_check = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='accounts'"
+        ).fetchone()
+        if acc_type_check and 'metal' not in (acc_type_check[0] or ''):
+            # Determine exact column list from existing table to preserve order
+            acc_cols = [row[1] for row in conn.execute("PRAGMA table_info(accounts)").fetchall()]
+            # Commit any pending transaction before PRAGMA foreign_keys=OFF
+            # (the PRAGMA is a no-op inside an active transaction)
+            conn.commit()
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute("""
+                CREATE TABLE accounts_metal (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name        TEXT NOT NULL,
+                    type        TEXT NOT NULL
+                                CHECK(type IN ('bank','loan','shares','investment_group','metal')),
+                    institution TEXT,
+                    currency    TEXT NOT NULL DEFAULT 'USD',
+                    is_active   INTEGER NOT NULL DEFAULT 1,
+                    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                    user_id     INTEGER REFERENCES users(id)
+                )
+            """)
+            col_list = ', '.join(acc_cols)
+            conn.execute(f"INSERT INTO accounts_metal ({col_list}) SELECT {col_list} FROM accounts")
+            conn.execute("DROP TABLE accounts")
+            conn.execute("ALTER TABLE accounts_metal RENAME TO accounts")
+            conn.commit()
+            conn.execute("PRAGMA foreign_keys = ON")
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS metal_details (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id     INTEGER NOT NULL UNIQUE REFERENCES accounts(id) ON DELETE CASCADE,
+                metal_type     TEXT NOT NULL CHECK(metal_type IN ('gold','silver')),
+                holding_type   TEXT CHECK(holding_type IN ('jewellery','digital_gold','physical')),
+                quantity_grams REAL NOT NULL DEFAULT 0
+            )
+        """)
+
+        # Migration 9: Zakat settings table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS zakat_settings (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id              INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+                hawl_date            TEXT,
+                nisab_standard       TEXT NOT NULL DEFAULT 'gold',
+                stocks_rate          REAL NOT NULL DEFAULT 0.25,
+                gold_grams           REAL NOT NULL DEFAULT 0,
+                gold_jewellery_grams REAL NOT NULL DEFAULT 0,
+                silver_grams         REAL NOT NULL DEFAULT 0,
+                business_goods       REAL NOT NULL DEFAULT 0,
+                receivables          REAL NOT NULL DEFAULT 0,
+                pension              REAL NOT NULL DEFAULT 0,
+                created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+
         conn.commit()
+
+        # Encrypt any existing plaintext data if encryption key is set
+        _encrypt_existing_data_sqlite(conn)
+
+
+def _encrypt_existing_data_sqlite(conn):
+    """Encrypt existing plaintext data in a SQLite DB connection (idempotent)."""
+    f = _get_fernet()
+    if f is None:
+        return  # encryption disabled — nothing to do
+
+    def encrypt_column(table, column, numeric=False):
+        rows = conn.execute(f"SELECT id, {column} FROM {table} WHERE {column} IS NOT NULL").fetchall()
+        for row in rows:
+            val = row[column] if hasattr(row, 'keys') else row[1]
+            rid = row['id'] if hasattr(row, 'keys') else row[0]
+            if val is None or _is_encrypted(str(val)):
+                continue
+            encrypted = f.encrypt(str(val).encode()).decode()
+            conn.execute(f"UPDATE {table} SET {column}=? WHERE id=?", (encrypted, rid))
+
+    encrypt_column('balance_entries', 'amount', numeric=True)
+    encrypt_column('balance_entries', 'note')
+    encrypt_column('bucket_allocations', 'amount', numeric=True)
+    encrypt_column('accounts', 'name')
+    encrypt_column('accounts', 'institution')
+    encrypt_column('buckets', 'name')
+    encrypt_column('buckets', 'target', numeric=True)
+    encrypt_column('transactions', 'counterparty')
+    encrypt_column('transactions', 'note')
+    conn.commit()
+
+
+def _encrypt_existing_data_postgres(conn):
+    """Encrypt existing plaintext data in a PostgreSQL connection (idempotent)."""
+    f = _get_fernet()
+    if f is None:
+        return  # encryption disabled — nothing to do
+
+    def encrypt_column(table, column):
+        rows = conn.execute(f"SELECT id, {column} FROM {table} WHERE {column} IS NOT NULL AND {column} != ''").fetchall()
+        for row in rows:
+            val = row[column]
+            rid = row['id']
+            if val is None or _is_encrypted(str(val)):
+                continue
+            encrypted = f.encrypt(str(val).encode()).decode()
+            conn.execute(f"UPDATE {table} SET {column}=%s WHERE id=%s".replace('%s', '?'), (encrypted, rid))
+
+    encrypt_column('balance_entries', 'amount')
+    encrypt_column('balance_entries', 'note')
+    encrypt_column('bucket_allocations', 'amount')
+    encrypt_column('accounts', 'name')
+    encrypt_column('accounts', 'institution')
+    encrypt_column('buckets', 'name')
+    encrypt_column('buckets', 'target')
+    encrypt_column('transactions', 'counterparty')
+    encrypt_column('transactions', 'note')
+    conn.commit()
 
 
 def _parse_scope(value):
@@ -1441,9 +1697,165 @@ def _make_family_name(base_name):
     return f'{clean} Household'
 
 
+# ── Application-level encryption (Fernet) ─────────────────────────────────────
+# Set SOF_ENCRYPTION_KEY env var to any passphrase to enable encryption.
+# When enabled, sensitive text and numeric columns are stored as Fernet ciphertext.
+# Without the key, data is stored in plaintext (default for local installs).
+_fernet_instance = None
+_fernet_init_done = False
+
+
+def _get_fernet():
+    """Return the Fernet instance (singleton), or None if encryption is disabled."""
+    global _fernet_instance, _fernet_init_done
+    if _fernet_init_done:
+        return _fernet_instance
+    raw_key = os.environ.get('SOF_ENCRYPTION_KEY', '').strip()
+    if not raw_key:
+        _fernet_init_done = True
+        return None
+    try:
+        from cryptography.fernet import Fernet
+        key_bytes = hashlib.sha256(raw_key.encode()).digest()
+        fernet_key = base64.urlsafe_b64encode(key_bytes)
+        _fernet_instance = Fernet(fernet_key)
+    except Exception:
+        _fernet_instance = None
+    _fernet_init_done = True
+    return _fernet_instance
+
+
+def _enc(v):
+    """Encrypt a value for DB storage. Returns ciphertext string, or original if encryption is disabled or value is None."""
+    if v is None:
+        return None
+    f = _get_fernet()
+    if f is None:
+        return v
+    return f.encrypt(str(v).encode()).decode()
+
+
+def _dec(v):
+    """Decrypt a text value from DB. Falls back gracefully to plaintext for pre-encryption data."""
+    if v is None:
+        return None
+    f = _get_fernet()
+    if f is None:
+        return v
+    if not isinstance(v, (str, bytes)):
+        return v
+    try:
+        return f.decrypt(v.encode() if isinstance(v, str) else v).decode()
+    except Exception:
+        return v  # plaintext fallback for legacy / unencrypted data
+
+
+def _dec_num(v):
+    """Decrypt a numeric value that was stored encrypted. Returns float or None."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    decrypted = _dec(v)
+    if decrypted is None:
+        return None
+    try:
+        return float(decrypted)
+    except (TypeError, ValueError):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+
+def _is_encrypted(v):
+    """Check if a value looks like Fernet ciphertext (starts with gAAAAA)."""
+    if v is None:
+        return True
+    return str(v).startswith('gAAAAA')
+
+
 # Stock-price helpers
 
 # Rate cache: (rates_dict, fetched_date_str)  — refreshed once per calendar day
+# ── Metals price cache (gold + silver, refreshed daily) ───────────────────────
+_metals_cache: tuple = (None, None)   # (metals_dict, fetched_date_str)
+TROY_OZ_TO_GRAMS = 31.1035            # 1 troy oz = 31.1035 grams
+GOLD_NISAB_GRAMS = 87.48              # standard gold nisab
+SILVER_NISAB_GRAMS = 612.36           # standard silver nisab
+
+
+def _fetch_metals_usd():
+    """Return gold and silver prices in USD per gram, cached daily."""
+    global _metals_cache
+    cached, cached_date = _metals_cache
+    today = datetime.utcnow().strftime('%Y-%m-%d')
+    if cached and cached_date == today:
+        return cached
+    try:
+        def _yahoo_price(ticker):
+            url = f'https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=1d'
+            req = urllib.request.Request(url, headers={
+                'User-Agent': 'Mozilla/5.0',
+                'Accept': 'application/json',
+            })
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = _json.loads(resp.read())
+            return float(data['chart']['result'][0]['meta']['regularMarketPrice'])
+
+        gold_per_oz  = _yahoo_price('GC=F')   # Gold futures USD/troy oz
+        silver_per_oz = _yahoo_price('SI=F')   # Silver futures USD/troy oz
+        metals = {
+            'gold_per_gram':   gold_per_oz  / TROY_OZ_TO_GRAMS,
+            'silver_per_gram': silver_per_oz / TROY_OZ_TO_GRAMS,
+            'gold_per_oz':     gold_per_oz,
+            'silver_per_oz':   silver_per_oz,
+        }
+        _metals_cache = (metals, today)
+        return metals
+    except Exception:
+        # Fallback prices (approximate — updated periodically)
+        fallback = {
+            'gold_per_gram':   97.0,
+            'silver_per_gram': 1.05,
+            'gold_per_oz':     3018.0,
+            'silver_per_oz':   32.65,
+        }
+        _metals_cache = (fallback, today)
+        return fallback
+
+
+def _auto_price_metal_account(db, account_id):
+    """Fetch live metal price and insert a balance entry. Returns info dict."""
+    metals = _fetch_metals_usd()
+    md = db.execute(
+        "SELECT metal_type, holding_type, quantity_grams FROM metal_details WHERE account_id=?",
+        (account_id,)
+    ).fetchone()
+    if not md:
+        raise ValueError('No metal_details found for account')
+    account = db.execute("SELECT currency FROM accounts WHERE id=?", (account_id,)).fetchone()
+    rates = _fetch_usd_rates()
+    grams = float(md['quantity_grams'] or 0)
+    price_usd_per_g = metals['gold_per_gram'] if md['metal_type'] == 'gold' else metals['silver_per_gram']
+    value_usd = grams * price_usd_per_g
+    acct_currency = _normalize_currency(account['currency'], default='USD')
+    value_native = _convert_currency_amount(value_usd, 'USD', acct_currency, rates=rates)
+    holding_label = md['holding_type'].replace('_', ' ').title() if md['holding_type'] else md['metal_type'].title()
+    note = f"{grams:g}g {holding_label} @ {price_usd_per_g:.2f} USD/g"
+    db.execute(
+        "INSERT INTO balance_entries (account_id, amount, note) VALUES (?,?,?)",
+        (account_id, _enc(value_native), _enc(note))
+    )
+    db.commit()
+    return {
+        'value_native': value_native,
+        'currency': acct_currency,
+        'price_usd_per_gram': price_usd_per_g,
+        'quantity_grams': grams,
+    }
+
+
 _rates_cache: tuple = (None, None)
 
 def _fetch_usd_rates():
@@ -1634,7 +2046,7 @@ def _auto_price_and_entry(db, account_id):
 
     db.execute(
         "INSERT INTO balance_entries (account_id, amount, note) VALUES (?,?,?)",
-        (account_id, value_native, f'Auto: {ticker} @ {currency} {price:,.4f} × {qty}')
+        (account_id, _enc(value_native), _enc(f'Auto: {ticker} @ {currency} {price:,.4f} × {qty}'))
     )
     return {
         'price': price,
@@ -1666,28 +2078,52 @@ def _latest_bank_entries(db, user_id=None, family_id=None):
     params = []
     _append_owner_filter(where, params, alias='a', user_id=user_id, family_id=family_id)
 
-    rows = db.execute(f"""
+    # Fetch base rows without SQL aggregation so encrypted amounts can be summed in Python
+    base_rows = db.execute(f"""
         SELECT be.id AS balance_entry_id,
                be.account_id,
                a.name AS account_name,
                a.currency AS account_currency,
-               be.amount,
-               COALESCE(SUM(ba.amount), 0) AS total_allocated,
-               COALESCE(SUM(CASE WHEN b.allocation_type = 'manual' THEN ba.amount ELSE 0 END), 0) AS manual_allocated
+               be.amount
         FROM balance_entries be
         JOIN accounts a ON a.id = be.account_id
-        LEFT JOIN bucket_allocations ba ON ba.balance_entry_id = be.id
-        LEFT JOIN buckets b ON b.id = ba.bucket_id
         WHERE {" AND ".join(where)}
-        GROUP BY be.id, be.account_id, a.name, a.currency, be.amount
     """, params).fetchall()
+
+    if not base_rows:
+        return []
+
+    entry_ids = [row['balance_entry_id'] for row in base_rows]
+    placeholders = ','.join('?' for _ in entry_ids)
+
+    # Fetch all allocations for these entries (no SUM in SQL — decrypt in Python)
+    alloc_rows = db.execute(f"""
+        SELECT ba.balance_entry_id, ba.amount, b.allocation_type
+        FROM bucket_allocations ba
+        JOIN buckets b ON b.id = ba.bucket_id
+        WHERE ba.balance_entry_id IN ({placeholders})
+    """, entry_ids).fetchall()
+
+    total_alloc = {}
+    manual_alloc = {}
+    for ar in alloc_rows:
+        eid = ar['balance_entry_id']
+        amt = _dec_num(ar['amount']) or 0.0
+        total_alloc[eid] = total_alloc.get(eid, 0.0) + amt
+        if ar['allocation_type'] == 'manual':
+            manual_alloc[eid] = manual_alloc.get(eid, 0.0) + amt
+
     rates = _fetch_usd_rates()
     result = []
-    for row in rows:
+    for row in base_rows:
         item = dict(row)
+        item['account_name'] = _dec(item['account_name'])
+        item['amount'] = _dec_num(item['amount'])
+        item['total_allocated'] = total_alloc.get(item['balance_entry_id'], 0.0)
+        item['manual_allocated'] = manual_alloc.get(item['balance_entry_id'], 0.0)
         item['amount_usd'] = _currency_to_usd(item['amount'], item['account_currency'], rates=rates)
         result.append(item)
-    return sorted(result, key=lambda item: (-item['amount_usd'], item['account_name'].lower()))
+    return sorted(result, key=lambda item: (-(item['amount_usd'] or 0), (item['account_name'] or '').lower()))
 
 
 def _has_auto_buckets(db, user_id):
@@ -1711,11 +2147,12 @@ def _latest_manual_allocations_for_account(db, account_id):
         )
           AND b.allocation_type = 'manual'
     """, (account_id,)).fetchall()
-    return {
-        int(row['bucket_id']): float(row['amount'] or 0)
-        for row in rows
-        if float(row['amount'] or 0) > 0
-    }
+    result = {}
+    for row in rows:
+        amt = _dec_num(row['amount']) or 0.0
+        if amt > 0:
+            result[int(row['bucket_id'])] = amt
+    return result
 
 
 def _cash_position_summary(db, user_id=None, family_id=None, rates=None):
@@ -1745,7 +2182,7 @@ def _cash_position_summary(db, user_id=None, family_id=None, rates=None):
         WHERE {" AND ".join(where)}
     """, params).fetchall()
     loan_total = sum(
-        abs(_currency_to_usd(row['amount'], row['currency'], rates=rates))
+        abs(_currency_to_usd(_dec_num(row['amount']), row['currency'], rates=rates))
         for row in loan_rows
     )
     return {
@@ -1757,8 +2194,8 @@ def _cash_position_summary(db, user_id=None, family_id=None, rates=None):
 
 
 def _latest_bucket_allocated_total(db, bucket_id):
-    row = db.execute("""
-        SELECT COALESCE(SUM(ba.amount), 0) AS allocated
+    rows = db.execute("""
+        SELECT ba.amount
         FROM bucket_allocations ba
         JOIN balance_entries be ON be.id = ba.balance_entry_id
         JOIN accounts a ON a.id = be.account_id
@@ -1769,8 +2206,8 @@ def _latest_bucket_allocated_total(db, bucket_id):
               WHERE b2.account_id = be.account_id
               ORDER BY recorded_at DESC LIMIT 1
           )
-    """, (bucket_id,)).fetchone()
-    return float(row['allocated'] or 0)
+    """, (bucket_id,)).fetchall()
+    return sum(_dec_num(row['amount']) or 0.0 for row in rows)
 
 
 def _allocate_manual_bucket(db, bucket_id, amount):
@@ -1803,12 +2240,21 @@ def _allocate_manual_bucket(db, bucket_id, amount):
             continue
 
         allocated = min(available, remaining)
-        db.execute("""
-            INSERT INTO bucket_allocations (balance_entry_id, bucket_id, amount)
-            VALUES (?,?,?)
-            ON CONFLICT(balance_entry_id, bucket_id) DO UPDATE SET
-                amount = bucket_allocations.amount + excluded.amount
-        """, (entry['balance_entry_id'], bucket_id, allocated))
+        existing_alloc = db.execute(
+            "SELECT id, amount FROM bucket_allocations WHERE balance_entry_id=? AND bucket_id=?",
+            (entry['balance_entry_id'], bucket_id)
+        ).fetchone()
+        if existing_alloc:
+            new_alloc_amt = (_dec_num(existing_alloc['amount']) or 0.0) + allocated
+            db.execute(
+                "UPDATE bucket_allocations SET amount=? WHERE id=?",
+                (_enc(new_alloc_amt), existing_alloc['id'])
+            )
+        else:
+            db.execute(
+                "INSERT INTO bucket_allocations (balance_entry_id, bucket_id, amount) VALUES (?,?,?)",
+                (entry['balance_entry_id'], bucket_id, _enc(allocated))
+            )
         entry['total_allocated'] = float(entry['total_allocated'] or 0) + allocated
         remaining -= allocated
         accounts_used += 1
@@ -1840,13 +2286,14 @@ def _auto_allocate_buckets(db, user_id):
     allocatable_buckets = []
     skipped_buckets = []
     for bucket in auto_buckets:
-        target = float(bucket['target'] or 0)
+        target = _dec_num(bucket['target']) or 0.0
+        bucket_name = _dec(bucket['name'])
         if target <= 0:
-            skipped_buckets.append(bucket['name'])
+            skipped_buckets.append(bucket_name)
             continue
         allocatable_buckets.append({
             'id': bucket['id'],
-            'name': bucket['name'],
+            'name': bucket_name,
             'target': target,
         })
     if not allocatable_buckets:
@@ -1917,7 +2364,7 @@ def _auto_allocate_buckets(db, user_id):
     for balance_entry_id, bucket_id, amount in planned_allocations:
         db.execute(
             "INSERT INTO bucket_allocations (balance_entry_id, bucket_id, amount) VALUES (?,?,?)",
-            (balance_entry_id, bucket_id, amount)
+            (balance_entry_id, bucket_id, _enc(amount))
         )
 
     total_required = sum(bucket['target'] for bucket in allocatable_buckets)
@@ -1946,7 +2393,7 @@ def _get_latest_balance(db, account_id):
         "SELECT amount FROM balance_entries WHERE account_id=? ORDER BY id DESC LIMIT 1",
         (account_id,)
     ).fetchone()
-    return float(row['amount']) if row else 0.0
+    return _dec_num(row['amount']) if row else 0.0
 
 
 def _create_txn_balance_entry(db, account_id, amount, txn_id, note, recorded_at=None):
@@ -1973,12 +2420,12 @@ def _create_txn_balance_entry(db, account_id, amount, txn_id, note, recorded_at=
         cur = db.execute(
             "INSERT INTO balance_entries (account_id, amount, note, transaction_id, recorded_at) "
             "VALUES (?,?,?,?,?)",
-            (account_id, amount, note, txn_id, recorded_at)
+            (account_id, _enc(amount), _enc(note), txn_id, recorded_at)
         )
     else:
         cur = db.execute(
             "INSERT INTO balance_entries (account_id, amount, note, transaction_id) VALUES (?,?,?,?)",
-            (account_id, amount, note, txn_id)
+            (account_id, _enc(amount), _enc(note), txn_id)
         )
     entry_id = cur.lastrowid
 
@@ -1986,7 +2433,7 @@ def _create_txn_balance_entry(db, account_id, amount, txn_id, note, recorded_at=
         if alloc_amount > 1e-9:
             db.execute(
                 "INSERT INTO bucket_allocations (balance_entry_id, bucket_id, amount) VALUES (?,?,?)",
-                (entry_id, bucket_id, alloc_amount)
+                (entry_id, bucket_id, _enc(alloc_amount))
             )
     return entry_id
 
@@ -2104,7 +2551,7 @@ def _execute_transaction(db, user_id, txn_type, amount,
         source_amount, source_currency,
         destination_amount, destination_currency, normalized_fx_rate,
         from_account_id, to_account_id,
-        counterparty, note,
+        _enc(counterparty), _enc(note),
         recorded_at or now, now
     ))
     txn_id = cur.lastrowid
@@ -2124,8 +2571,8 @@ def _execute_transaction(db, user_id, txn_type, amount,
     else:  # intra
         new_from = old_from - source_amount
         new_to = old_to + destination_amount
-        from_note = f"Transfer out → {to_acc['name']}" + (f' — {note}' if note else '')
-        to_note = f"Transfer in ← {from_acc['name']}" + (f' — {note}' if note else '')
+        from_note = f"Transfer out → {_dec(to_acc['name'])}" + (f' — {note}' if note else '')
+        to_note = f"Transfer in ← {_dec(from_acc['name'])}" + (f' — {note}' if note else '')
         _create_txn_balance_entry(db, from_account_id, new_from, txn_id, from_note, recorded_at)
         _create_txn_balance_entry(db, to_account_id, new_to, txn_id, to_note, recorded_at)
         if (from_acc['type'] == 'bank' or to_acc['type'] == 'bank') and _has_auto_buckets(db, user_id):
@@ -2534,7 +2981,7 @@ def create_account():
         account_currency = _share_native_currency(share_payload['exchange'])
     cur = db.execute(
         "INSERT INTO accounts (user_id, name, type, institution, currency) VALUES (?,?,?,?,?)",
-        (user_id, d['name'], d['type'], d.get('institution', ''), account_currency)
+        (user_id, _enc(d['name']), d['type'], _enc(d.get('institution', '') or ''), account_currency)
     )
     account_id = cur.lastrowid
     price_info = None
@@ -2552,7 +2999,7 @@ def create_account():
         if prin:
             db.execute(
                 "INSERT INTO balance_entries (account_id, amount, note) VALUES (?,?,?)",
-                (account_id, -abs(prin), 'Initial principal')
+                (account_id, _enc(-abs(prin)), _enc('Initial principal'))
             )
 
     elif d['type'] == 'shares':
@@ -2577,6 +3024,20 @@ def create_account():
         except Exception as e:
             price_info = {'error': str(e)}
 
+    elif d['type'] == 'metal':
+        metal_type    = d.get('metal_type', 'gold')
+        holding_type  = d.get('holding_type') or None   # null for silver or unspecified
+        quantity_grams = float(d.get('quantity_grams') or 0)
+        db.execute("""
+            INSERT INTO metal_details (account_id, metal_type, holding_type, quantity_grams)
+            VALUES (?,?,?,?)
+        """, (account_id, metal_type, holding_type, quantity_grams))
+        db.commit()
+        try:
+            price_info = _auto_price_metal_account(db, account_id)
+        except Exception as e:
+            price_info = {'error': str(e)}
+
     db.commit()
     row = db.execute(_ACCOUNT_SELECT + " WHERE a.id=?", (account_id,)).fetchone()
     result = _serialize_account_row(row, rates=_fetch_usd_rates())
@@ -2598,6 +3059,11 @@ def update_account(aid):
     fields = {k: v for k, v in d.items() if k in ('name', 'type', 'institution')}
     target_type = fields.get('type', account['type'])
     if fields:
+        # Encrypt sensitive text fields before storing
+        if 'name' in fields:
+            fields['name'] = _enc(fields['name'])
+        if 'institution' in fields:
+            fields['institution'] = _enc(fields['institution'])
         set_clause = ', '.join(f"{k}=?" for k in fields)
         db.execute(f"UPDATE accounts SET {set_clause} WHERE id=?", (*fields.values(), aid))
 
@@ -2623,7 +3089,7 @@ def update_account(aid):
         if 'remaining_principal' in loan_fields and loan_fields['remaining_principal']:
             db.execute(
                 "INSERT INTO balance_entries (account_id, amount, note) VALUES (?,?,?)",
-                (aid, -abs(loan_fields['remaining_principal']), 'Principal update')
+                (aid, _enc(-abs(loan_fields['remaining_principal'])), _enc('Principal update'))
             )
 
     share_keys = {'stock_name', 'exchange', 'stock_code', 'quantity', 'purchase_price', 'purchase_price_currency'}
@@ -2693,6 +3159,29 @@ def update_account(aid):
             skip_loan_details=bool(loan_fields),
         )
 
+    # Metal detail updates
+    metal_keys = {'metal_type', 'holding_type', 'quantity_grams'}
+    metal_fields = {k: v for k, v in d.items() if k in metal_keys}
+    if metal_fields and target_type == 'metal':
+        db.execute("""
+            INSERT INTO metal_details (account_id, metal_type, holding_type, quantity_grams)
+            VALUES (:account_id, :mt, :ht, :qg)
+            ON CONFLICT(account_id) DO UPDATE SET
+                metal_type     = excluded.metal_type,
+                holding_type   = excluded.holding_type,
+                quantity_grams = excluded.quantity_grams
+        """, {
+            'account_id': aid,
+            'mt': metal_fields.get('metal_type', 'gold'),
+            'ht': metal_fields.get('holding_type') or None,
+            'qg': float(metal_fields.get('quantity_grams') or 0),
+        })
+        db.commit()
+        try:
+            price_info = _auto_price_metal_account(db, aid)
+        except Exception as e:
+            price_info = {'error': str(e)}
+
     should_remote_refresh = bool({'exchange', 'stock_code'} & share_fields.keys())
     should_cached_revalue = 'quantity' in share_fields and not should_remote_refresh
     if should_remote_refresh:
@@ -2719,8 +3208,18 @@ def update_account(aid):
 def refresh_stock_price(aid):
     db = get_db()
     acc = _owned_account(db, aid)
-    if not acc or acc['type'] != 'shares':
-        return _json_error('Not a shares asset', 400)
+    if not acc:
+        return _json_error('Account not found', 404)
+    if acc['type'] == 'metal':
+        try:
+            info = _auto_price_metal_account(db, aid)
+            db.commit()
+            row = db.execute(_ACCOUNT_SELECT + " WHERE a.id=?", (aid,)).fetchone()
+            return jsonify({**info, 'ok': True, 'account': _serialize_account_row(row, rates=_fetch_usd_rates())})
+        except Exception as e:
+            return _json_error(str(e), 502)
+    if acc['type'] != 'shares':
+        return _json_error('Not a shares or metal asset', 400)
     try:
         info = _auto_price_and_entry(db, aid)
         db.commit()
@@ -2772,7 +3271,7 @@ def apply_loan_emi(aid):
     )
     db.execute(
         "INSERT INTO balance_entries (account_id, amount, note) VALUES (?,?,?)",
-        (aid, -new_principal, note)
+        (aid, _enc(-new_principal), _enc(note))
     )
     db.commit()
 
@@ -2937,18 +3436,18 @@ def create_balance():
     if recorded_at:
         cur = db.execute(
             "INSERT INTO balance_entries (account_id, amount, note, recorded_at) VALUES (?,?,?,?)",
-            (d['account_id'], d['amount'], d.get('note', ''), recorded_at)
+            (d['account_id'], _enc(d['amount']), _enc(d.get('note', '') or ''), recorded_at)
         )
     else:
         cur = db.execute(
             "INSERT INTO balance_entries (account_id, amount, note) VALUES (?,?,?)",
-            (d['account_id'], d['amount'], d.get('note', ''))
+            (d['account_id'], _enc(d['amount']), _enc(d.get('note', '') or ''))
         )
     entry_id = cur.lastrowid
     for alloc in positive_allocations:
         db.execute(
             "INSERT INTO bucket_allocations (balance_entry_id, bucket_id, amount) VALUES (?,?,?)",
-            (entry_id, alloc['bucket_id'], alloc['amount'])
+            (entry_id, alloc['bucket_id'], _enc(alloc['amount']))
         )
 
     auto_allocation_result = None
@@ -3004,7 +3503,13 @@ def list_buckets():
         query += " WHERE " + " AND ".join(filters)
     query += " ORDER BY b.sort_order, b.name"
     rows = db.execute(query, params).fetchall()
-    return jsonify([dict(r) for r in rows])
+    result = []
+    for r in rows:
+        d = dict(r)
+        d['name'] = _dec(d.get('name'))
+        d['target'] = _dec_num(d.get('target'))
+        result.append(d)
+    return jsonify(result)
 
 
 @app.route('/api/buckets', methods=['POST'])
@@ -3019,7 +3524,7 @@ def create_bucket():
 
     cur = db.execute(
         "INSERT INTO buckets (user_id, name, target, color, allocation_type) VALUES (?,?,?,?,?)",
-        (current_finance_user_id(), d['name'], d.get('target'), d.get('color', '#6366f1'), allocation_type)
+        (current_finance_user_id(), _enc(d['name']), _enc(d.get('target')), d.get('color', '#6366f1'), allocation_type)
     )
     db.commit()
     row = db.execute("""
@@ -3028,7 +3533,10 @@ def create_bucket():
         JOIN users u ON u.id = b.user_id
         WHERE b.id=?
     """, (cur.lastrowid,)).fetchone()
-    return jsonify(dict(row)), 201
+    result = dict(row)
+    result['name'] = _dec(result.get('name'))
+    result['target'] = _dec_num(result.get('target'))
+    return jsonify(result), 201
 
 
 @app.route('/api/buckets/<int:bid>', methods=['PATCH'])
@@ -3047,6 +3555,11 @@ def update_bucket(bid):
         except ValueError as e:
             return _json_error(str(e), 400)
     if fields:
+        # Encrypt sensitive fields before storing
+        if 'name' in fields:
+            fields['name'] = _enc(fields['name'])
+        if 'target' in fields:
+            fields['target'] = _enc(fields['target'])
         set_clause = ', '.join(f"{k}=?" for k in fields)
         db.execute(f"UPDATE buckets SET {set_clause} WHERE id=?", (*fields.values(), bid))
         db.commit()
@@ -3056,7 +3569,10 @@ def update_bucket(bid):
         JOIN users u ON u.id = b.user_id
         WHERE b.id=?
     """, (bid,)).fetchone()
-    return jsonify(dict(row))
+    result = dict(row)
+    result['name'] = _dec(result.get('name'))
+    result['target'] = _dec_num(result.get('target'))
+    return jsonify(result)
 
 
 @app.route('/api/buckets/auto-allocate', methods=['POST'])
@@ -3135,7 +3651,7 @@ def net_worth():
     total = 0.0
     by_type = {}
     for r in rows:
-        usd_amount = _currency_to_usd(r['amount'], r['currency'], rates=rates)
+        usd_amount = _currency_to_usd(_dec_num(r['amount']), r['currency'], rates=rates)
         total += usd_amount
         by_type[r['type']] = by_type.get(r['type'], 0) + usd_amount
 
@@ -3174,18 +3690,23 @@ def bucket_summary():
     alloc_params = []
     _append_owner_filter(alloc_filters, alloc_params, alias='a', user_id=user_id, family_id=family_id)
     alloc_rows = db.execute(f"""
-        SELECT ba.bucket_id, COALESCE(SUM(ba.amount), 0) AS allocated
+        SELECT ba.bucket_id, ba.amount
         FROM bucket_allocations ba
         JOIN balance_entries be ON be.id = ba.balance_entry_id
         JOIN accounts a ON a.id = be.account_id
         WHERE {" AND ".join(alloc_filters)}
-        GROUP BY ba.bucket_id
     """, alloc_params).fetchall()
-    allocated_by_bucket = {row['bucket_id']: row['allocated'] for row in alloc_rows}
+    # Python-side aggregation to support encrypted amounts
+    allocated_by_bucket = {}
+    for row in alloc_rows:
+        bid = row['bucket_id']
+        allocated_by_bucket[bid] = allocated_by_bucket.get(bid, 0.0) + (_dec_num(row['amount']) or 0.0)
 
     results = []
     for b in buckets:
         d = dict(b)
+        d['name'] = _dec(d.get('name'))
+        d['target'] = _dec_num(d.get('target'))
         d['allocated'] = allocated_by_bucket.get(b['id'], 0.0)
         results.append(d)
 
@@ -3250,6 +3771,14 @@ def timeline():
     for row in all_entries:
         entries_by_account[row['account_id']].append(row)
 
+    # Decrypt account names for timeline display
+    accounts_decrypted = []
+    for a in accounts:
+        d = dict(a)
+        d['name'] = _dec(d.get('name'))
+        accounts_decrypted.append(d)
+    accounts = accounts_decrypted
+
     acc_map = {a['id']: dict(a) for a in accounts}
     for acc in accounts:
         rows = entries_by_account[acc['id']]
@@ -3258,7 +3787,7 @@ def timeline():
             period = _period_label(r['recorded_at'], interval)
             if period is None:
                 continue
-            period_map[period] = _currency_to_usd(r['amount'], acc['currency'], rates=rates)
+            period_map[period] = _currency_to_usd(_dec_num(r['amount']), acc['currency'], rates=rates)
         all_periods.update(period_map.keys())
         account_series.append({'account': dict(acc), 'data': period_map})
 
@@ -3454,6 +3983,258 @@ def exchange_rates():
             'base': 'USD',
             'error': str(e),
         })
+
+
+# ── Zakaat ────────────────────────────────────────────────────────────────────
+
+def _get_or_create_zakat_settings(db, user_id):
+    """Return the zakat_settings row for a user, creating defaults if absent."""
+    row = db.execute(
+        "SELECT * FROM zakat_settings WHERE user_id=?", (user_id,)
+    ).fetchone()
+    if row:
+        return dict(row)
+    db.execute("""
+        INSERT INTO zakat_settings
+            (user_id, nisab_standard, stocks_rate,
+             gold_grams, gold_jewellery_grams, silver_grams,
+             business_goods, receivables, pension)
+        VALUES (?,?,?,?,?,?,?,?,?)
+    """, (user_id, 'gold', 0.25, 0, 0, 0, 0, 0, 0))
+    db.commit()
+    return dict(db.execute(
+        "SELECT * FROM zakat_settings WHERE user_id=?", (user_id,)
+    ).fetchone())
+
+
+@app.route('/api/zakat/settings', methods=['GET'])
+@login_required
+def get_zakat_settings():
+    db = get_db()
+    user_id = current_finance_user_id()
+    settings = _get_or_create_zakat_settings(db, user_id)
+    return jsonify(settings)
+
+
+@app.route('/api/zakat/settings', methods=['PATCH'])
+@login_required
+def update_zakat_settings():
+    db = get_db()
+    user_id = current_finance_user_id()
+    d = request.get_json(silent=True) or {}
+
+    allowed = {
+        'hawl_date', 'nisab_standard', 'stocks_rate',
+        'gold_grams', 'gold_jewellery_grams', 'silver_grams',
+        'business_goods', 'receivables', 'pension',
+    }
+    fields = {}
+    for key in allowed:
+        if key not in d:
+            continue
+        if key == 'nisab_standard':
+            if d[key] not in ('gold', 'silver'):
+                return _json_error('nisab_standard must be gold or silver', 400)
+            fields[key] = d[key]
+        elif key == 'stocks_rate':
+            try:
+                val = float(d[key])
+            except (TypeError, ValueError):
+                return _json_error('stocks_rate must be a number', 400)
+            if val not in (0.25, 1.0):
+                return _json_error('stocks_rate must be 0.25 or 1.0', 400)
+            fields[key] = val
+        elif key == 'hawl_date':
+            fields[key] = d[key] or None
+        else:
+            try:
+                fields[key] = max(0.0, float(d[key] or 0))
+            except (TypeError, ValueError):
+                return _json_error(f'{key} must be a number', 400)
+
+    if not fields:
+        return jsonify(_get_or_create_zakat_settings(db, user_id))
+
+    # Ensure row exists before updating
+    _get_or_create_zakat_settings(db, user_id)
+    fields['updated_at'] = _dt_str(_utc_now())
+    set_clause = ', '.join(f"{k}=?" for k in fields)
+    db.execute(
+        f"UPDATE zakat_settings SET {set_clause} WHERE user_id=?",
+        (*fields.values(), user_id)
+    )
+    db.commit()
+    return jsonify(_get_or_create_zakat_settings(db, user_id))
+
+
+@app.route('/api/zakat/summary', methods=['GET'])
+@login_required
+def zakat_summary():
+    db = get_db()
+    user_id = current_finance_user_id()
+    settings = _get_or_create_zakat_settings(db, user_id)
+
+    rates = _fetch_usd_rates()
+    metals = _fetch_metals_usd()
+    display_currency = db.execute(
+        "SELECT default_currency FROM users WHERE id=?", (user_id,)
+    ).fetchone()
+    currency = (display_currency['default_currency'] if display_currency else 'AED') or 'AED'
+
+    def to_display(usd_amount):
+        if usd_amount is None:
+            return 0.0
+        return usd_amount * (rates.get(currency, 1.0) or 1.0)
+
+    # ── 1. Cash & Savings — latest balance of all bank accounts ───────────────
+    bank_rows = db.execute("""
+        SELECT be.amount, a.currency AS acct_currency
+        FROM balance_entries be
+        JOIN accounts a ON a.id = be.account_id
+        WHERE a.user_id=? AND a.is_active=1 AND a.type='bank'
+          AND be.id = (
+              SELECT id FROM balance_entries b2
+              WHERE b2.account_id = be.account_id
+              ORDER BY id DESC LIMIT 1
+          )
+    """, (user_id,)).fetchall()
+    cash_usd = sum(
+        _currency_to_usd(_dec_num(r['amount']), r['acct_currency'], rates=rates) or 0
+        for r in bank_rows
+    )
+
+    # ── 2. Stocks — latest balance × stocks_rate ──────────────────────────────
+    stock_rows = db.execute("""
+        SELECT be.amount, a.currency AS acct_currency
+        FROM balance_entries be
+        JOIN accounts a ON a.id = be.account_id
+        WHERE a.user_id=? AND a.is_active=1 AND a.type='shares'
+          AND be.id = (
+              SELECT id FROM balance_entries b2
+              WHERE b2.account_id = be.account_id
+              ORDER BY id DESC LIMIT 1
+          )
+    """, (user_id,)).fetchall()
+    stocks_rate = float(settings.get('stocks_rate') or 0.25)
+    stocks_usd = sum(
+        (_currency_to_usd(_dec_num(r['amount']), r['acct_currency'], rates=rates) or 0) * stocks_rate
+        for r in stock_rows
+    )
+    stocks_full_usd = stocks_usd / stocks_rate if stocks_rate else 0  # full market value for display
+
+    # ── 3. Gold (investable = total − jewellery) ──────────────────────────────
+    # Pull grams from metal_details accounts (auto) + zakat_settings manual entry
+    metal_rows = db.execute("""
+        SELECT md.metal_type, md.holding_type, md.quantity_grams
+        FROM metal_details md
+        JOIN accounts a ON a.id = md.account_id
+        WHERE a.user_id=? AND a.is_active=1
+    """, (user_id,)).fetchall()
+    gold_total_g_auto    = sum(float(r['quantity_grams'] or 0) for r in metal_rows if r['metal_type'] == 'gold')
+    gold_jewellery_g_auto = sum(float(r['quantity_grams'] or 0) for r in metal_rows
+                                if r['metal_type'] == 'gold' and r['holding_type'] == 'jewellery')
+    silver_g_auto        = sum(float(r['quantity_grams'] or 0) for r in metal_rows if r['metal_type'] == 'silver')
+
+    gold_total_g      = gold_total_g_auto      + float(settings.get('gold_grams') or 0)
+    gold_jewellery_g  = gold_jewellery_g_auto  + float(settings.get('gold_jewellery_grams') or 0)
+    gold_investable_g = max(0.0, gold_total_g - gold_jewellery_g)
+    gold_price_usd_per_g = metals['gold_per_gram']
+    gold_usd = gold_investable_g * gold_price_usd_per_g
+
+    # ── 4. Silver ─────────────────────────────────────────────────────────────
+    silver_g = silver_g_auto + float(settings.get('silver_grams') or 0)
+    silver_price_usd_per_g = metals['silver_per_gram']
+    silver_usd = silver_g * silver_price_usd_per_g
+
+    # ── 5. Manual inputs (stored in USD) ──────────────────────────────────────
+    business_usd  = float(settings.get('business_goods') or 0)
+    receivables_usd = float(settings.get('receivables') or 0)
+    pension_usd   = float(settings.get('pension') or 0)
+
+    # ── 6. Deductions — EMI × 12 for all active loans ────────────────────────
+    loan_rows = db.execute("""
+        SELECT ld.monthly_emi, a.currency AS acct_currency
+        FROM loan_details ld
+        JOIN accounts a ON a.id = ld.account_id
+        WHERE a.user_id=? AND a.is_active=1
+    """, (user_id,)).fetchall()
+    loan_deduction_usd = sum(
+        (_currency_to_usd(float(r['monthly_emi'] or 0), r['acct_currency'], rates=rates) or 0) * 12
+        for r in loan_rows
+    )
+
+    # ── 7. Nisab ──────────────────────────────────────────────────────────────
+    nisab_standard = settings.get('nisab_standard', 'gold')
+    if nisab_standard == 'silver':
+        nisab_usd = SILVER_NISAB_GRAMS * silver_price_usd_per_g
+    else:
+        nisab_usd = GOLD_NISAB_GRAMS * gold_price_usd_per_g
+
+    # ── 8. Totals ─────────────────────────────────────────────────────────────
+    total_assets_usd = (
+        cash_usd + stocks_usd + gold_usd + silver_usd
+        + business_usd + receivables_usd + pension_usd
+    )
+    net_zakatable_usd = max(0.0, total_assets_usd - loan_deduction_usd)
+    eligible = net_zakatable_usd >= nisab_usd
+    zakat_due_usd = net_zakatable_usd * 0.025 if eligible else 0.0
+
+    # ── 9. Hawl status ────────────────────────────────────────────────────────
+    hawl_date = settings.get('hawl_date')
+    hawl_status = None
+    days_until_hawl = None
+    if hawl_date:
+        try:
+            hd = datetime.fromisoformat(str(hawl_date).split('T')[0])
+            today = _utc_now().replace(hour=0, minute=0, second=0, microsecond=0)
+            days_until_hawl = (hd - today).days
+            if days_until_hawl <= 0:
+                hawl_status = 'due'
+            elif days_until_hawl <= 30:
+                hawl_status = 'soon'
+            else:
+                hawl_status = 'upcoming'
+        except (ValueError, TypeError):
+            pass
+
+    return jsonify({
+        'currency': currency,
+        'nisab_standard': nisab_standard,
+        'stocks_rate': stocks_rate,
+        # Prices used (for transparency)
+        'gold_price_per_gram': to_display(gold_price_usd_per_g),
+        'silver_price_per_gram': to_display(silver_price_usd_per_g),
+        # Asset breakdown (all in display currency)
+        'assets': {
+            'cash':         to_display(cash_usd),
+            'stocks':       to_display(stocks_usd),
+            'stocks_full':  to_display(stocks_full_usd),
+            'gold':         to_display(gold_usd),
+            'silver':       to_display(silver_usd),
+            'business':     to_display(business_usd),
+            'receivables':  to_display(receivables_usd),
+            'pension':      to_display(pension_usd),
+            'total':        to_display(total_assets_usd),
+        },
+        'gold_grams': gold_total_g,
+        'gold_jewellery_grams': gold_jewellery_g,
+        'gold_investable_grams': gold_investable_g,
+        'silver_grams': silver_g,
+        # Deductions
+        'deductions': {
+            'loans': to_display(loan_deduction_usd),
+            'total': to_display(loan_deduction_usd),
+        },
+        # Summary
+        'net_zakatable':  to_display(net_zakatable_usd),
+        'nisab_value':    to_display(nisab_usd),
+        'eligible':       eligible,
+        'zakat_due':      to_display(zakat_due_usd),
+        # Hawl
+        'hawl_date':        hawl_date,
+        'hawl_status':      hawl_status,
+        'days_until_hawl':  days_until_hawl,
+    })
 
 
 if __name__ == '__main__':

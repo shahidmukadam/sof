@@ -626,6 +626,41 @@ SOF_SECRET_KEY=dev-secret \
 python app.py
 ```
 
+## Building A Windows Package
+
+For Windows users who should not have to install Python or dependencies separately, this repo includes a self-contained packaging flow based on PyInstaller.
+
+What the packaged Windows build does:
+
+- bundles Python, Flask, and all required dependencies into the app package
+- launches a small native Windows window plus the local web app in the default browser
+- stores `finance.db` and `secret.key` in the user's `%LOCALAPPDATA%\State of Finance` folder instead of inside the install directory
+- keeps user data outside the package so app updates do not overwrite it
+
+Important constraint:
+
+- the final Windows executable must be built on a Windows machine; PyInstaller does not cross-build Windows executables from macOS
+
+Build steps on Windows:
+
+1. Open PowerShell in the project root.
+2. Run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\windows\build_windows_package.ps1
+```
+
+This script will:
+
+- create a build virtual environment in `.venv-windows-package`
+- install everything from `requirements-windows-package.txt`
+- build the bundled app using `windows/StateOfFinance.spec`
+- create:
+  - `release/StateOfFinance-windows/`
+  - `release/StateOfFinance-windows-portable.zip`
+
+The end user only needs to unzip `StateOfFinance-windows-portable.zip` and run `StateOfFinance.exe`.
+
 ## Deploying On Render
 
 Recommended Render setup is a web service plus Render Postgres. The app switches to PostgreSQL automatically when `DATABASE_URL` is set.

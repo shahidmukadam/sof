@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS transactions (
 CREATE TABLE IF NOT EXISTS balance_entries (
     id             BIGSERIAL PRIMARY KEY,
     account_id     BIGINT NOT NULL REFERENCES accounts(id),
-    amount         DOUBLE PRECISION NOT NULL,
+    amount         TEXT NOT NULL DEFAULT '0',
     note           TEXT,
     recorded_at    TEXT NOT NULL DEFAULT to_char(timezone('utc', now()), 'YYYY-MM-DD"T"HH24:MI:SS'),
     transaction_id BIGINT REFERENCES transactions(id) ON DELETE SET NULL
@@ -100,7 +100,7 @@ CREATE TABLE IF NOT EXISTS bucket_allocations (
     id               BIGSERIAL PRIMARY KEY,
     balance_entry_id BIGINT NOT NULL REFERENCES balance_entries(id) ON DELETE CASCADE,
     bucket_id        BIGINT NOT NULL REFERENCES buckets(id) ON DELETE CASCADE,
-    amount           DOUBLE PRECISION NOT NULL,
+    amount           TEXT NOT NULL,
     UNIQUE(balance_entry_id, bucket_id)
 );
 
@@ -126,4 +126,20 @@ CREATE TABLE IF NOT EXISTS local_otp_outbox (
     expires_at        TEXT NOT NULL,
     resend_allowed_at TEXT NOT NULL,
     created_at        TEXT NOT NULL DEFAULT to_char(timezone('utc', now()), 'YYYY-MM-DD"T"HH24:MI:SS')
+);
+
+CREATE TABLE IF NOT EXISTS zakat_settings (
+    id                   BIGSERIAL PRIMARY KEY,
+    user_id              BIGINT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    hawl_date            TEXT,
+    nisab_standard       TEXT NOT NULL DEFAULT 'gold',
+    stocks_rate          DOUBLE PRECISION NOT NULL DEFAULT 0.25,
+    gold_grams           DOUBLE PRECISION NOT NULL DEFAULT 0,
+    gold_jewellery_grams DOUBLE PRECISION NOT NULL DEFAULT 0,
+    silver_grams         DOUBLE PRECISION NOT NULL DEFAULT 0,
+    business_goods       DOUBLE PRECISION NOT NULL DEFAULT 0,
+    receivables          DOUBLE PRECISION NOT NULL DEFAULT 0,
+    pension              DOUBLE PRECISION NOT NULL DEFAULT 0,
+    created_at           TEXT NOT NULL DEFAULT to_char(timezone('utc', now()), 'YYYY-MM-DD"T"HH24:MI:SS'),
+    updated_at           TEXT NOT NULL DEFAULT to_char(timezone('utc', now()), 'YYYY-MM-DD"T"HH24:MI:SS')
 );

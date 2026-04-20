@@ -32,6 +32,8 @@ const SHARE_EXCHANGE_CURRENCIES = {
   NSE: 'INR',
   BSE: 'INR',
 };
+const FEATURE_ANNOUNCEMENT_VERSION = 'zakaat_metals_v1';
+const FEATURE_ANNOUNCEMENT_KEY_PREFIX = `sof_feature_announcement_${FEATURE_ANNOUNCEMENT_VERSION}`;
 
 class ApiError extends Error {
   constructor(message, data, status) {
@@ -143,7 +145,17 @@ function typeLabel(t) {
     loan: 'Loan Account',
     shares: 'Shares',
     investment_group: 'Investment Group',
+    metal: 'Metals',
   }[t] || 'Other';
+}
+
+function metalLabel(account) {
+  const mt = (account.metal_type || 'gold');
+  const ht = account.holding_type;
+  const htLabel = { jewellery: 'Jewellery', digital_gold: 'Digital Gold', physical: 'Physical' }[ht] || '';
+  return mt === 'gold'
+    ? `🥇 Gold${htLabel ? ' — ' + htLabel : ''}`
+    : '🥈 Silver';
 }
 
 function dateStr(iso) {
@@ -528,12 +540,13 @@ function openModal(id) {
 }
 
 function switchTab(name) {
-  ['dashboard', 'accounts', 'buckets', 'timeline', 'transactions'].forEach(t => {
+  ['dashboard', 'accounts', 'buckets', 'timeline', 'transactions', 'zakat'].forEach(t => {
     document.getElementById(`tab-${t}`).classList.toggle('hidden', t !== name);
     document.querySelector(`[data-tab="${t}"]`).classList.toggle('active', t === name);
   });
   if (name === 'timeline') loadTimeline();
   if (name === 'transactions') loadTransactions();
+  if (name === 'zakat') loadZakat();
 }
 
 function setAppVisibility(isLoggedIn) {
@@ -687,7 +700,7 @@ async function signIn() {
   try {
     clearAuthStatus();
     const result = await api('/api/auth/signin', 'POST', { email, password });
-    await handleAuthenticated(result);
+    await handleAuthenticated(result, { announceNewFeatures: true });
   } catch (e) {
     setAuthStatus(e.message, 'error');
   }
@@ -806,7 +819,7 @@ async function logout() {
   switchAuthTab('signin');
 }
 
-async function handleAuthenticated(sessionPayload) {
+async function handleAuthenticated(sessionPayload, options = {}) {
   setSessionPayload(sessionPayload);
   setAppVisibility(true);
   clearOtpPreview();
@@ -815,7 +828,10 @@ async function handleAuthenticated(sessionPayload) {
     await fetchRates();
     updateCurrencyLabels();
     await loadData();
-    _maybeStartOnboarding();
+    const announcedFeatures = options.announceNewFeatures
+      ? maybeShowNewFeatureAnnouncement()
+      : false;
+    if (!announcedFeatures) _maybeStartOnboarding();
   } catch (e) {
     console.error('handleAuthenticated', e);
     alert(`The dashboard could not finish loading.\n${e.message || e}`);
@@ -861,6 +877,7 @@ async function _renderDashboard(nw, buckets, recent) {
     loan: 'text-orange-400',
     shares: 'text-indigo-400',
     investment_group: 'text-blue-400',
+    metal: 'text-yellow-400',
   };
   const breakdown = document.getElementById('byTypeBreakdown');
   breakdown.innerHTML = Object.entries(nw.by_type).map(([type, amt]) => `
@@ -871,7 +888,7 @@ async function _renderDashboard(nw, buckets, recent) {
   `).join('');
 
   if (Object.keys(nw.by_type).length) {
-    const colorMap = { bank: '#10b981', loan: '#f97316', shares: '#6366f1', investment_group: '#3b82f6' };
+    const colorMap = { bank: '#10b981', loan: '#f97316', shares: '#6366f1', investment_group: '#3b82f6', metal: '#eab308' };
     const colors = Object.keys(nw.by_type).map(t => colorMap[t] || '#6366f1');
     drawDonut('donutChart', Object.values(nw.by_type), Object.keys(nw.by_type).map(t => typeLabel(t)), colors);
   }
@@ -1012,6 +1029,16 @@ function compactAssetSubtitle(account, readOnly = false) {
   return parts.join(' · ');
 }
 
+function shareBalanceClassName(account) {
+  if (account.unrealized_gain_loss > 0 || account.is_profitable === true) {
+    return 'text-emerald-300';
+  }
+  if (account.unrealized_gain_loss < 0 || account.is_profitable === false) {
+    return 'text-rose-300';
+  }
+  return 'text-slate-300';
+}
+
 function accountBalancePresentation(account) {
   if (account.type === 'loan' && account.remaining_principal != null) {
     return {
@@ -1027,7 +1054,7 @@ function accountBalancePresentation(account) {
   if (account.type === 'shares' && account.latest_balance != null) {
     return {
       label: 'market value',
-      className: 'text-indigo-300',
+      className: shareBalanceClassName(account),
       value: moneyFromStored(account.latest_balance, account.currency, account.latest_balance_usd),
     };
   }
@@ -1068,12 +1095,14 @@ function assetSectionSummary(sectionType, accounts) {
     investment_group: 'Total balance',
     shares: 'Total market value',
     loan: 'Total outstanding',
+    metal: 'Total value',
   };
   const classMap = {
     bank: 'text-emerald-300',
     investment_group: 'text-blue-300',
     shares: 'text-indigo-300',
     loan: 'text-orange-300',
+    metal: 'text-yellow-300',
   };
   return {
     label: labelMap[sectionType] || 'Total',
@@ -1286,6 +1315,7 @@ function renderAccountCard(account, { readOnly, typeColors }) {
   const accountId = Number(account.id);
   const isLoan = account.type === 'loan';
   const isShares = account.type === 'shares';
+  const isMetal = account.type === 'metal';
   const balance = accountBalancePresentation(account);
   const canExpand = !readOnly && (account.type === 'bank' || account.type === 'loan' || account.type === 'shares');
   const isExpanded = canExpand && !!state.expandedAccounts[accountKey];
@@ -1304,11 +1334,12 @@ function renderAccountCard(account, { readOnly, typeColors }) {
           <div class="min-w-0 flex-1">
             <div class="flex items-center gap-2 flex-wrap">
               <p class="font-medium">${accountName}</p>
-              <span class="text-xs px-2 py-0.5 rounded-full ${typeColors[account.type] || 'bg-slate-500/20 text-slate-400'}">${escapeHtml(typeLabel(account.type))}</span>
+              <span class="text-xs px-2 py-0.5 rounded-full ${typeColors[account.type] || 'bg-slate-500/20 text-slate-400'}">${isMetal ? escapeHtml(metalLabel(account)) : escapeHtml(typeLabel(account.type))}</span>
             </div>
             ${subtitleHtml}
             <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
-              <span>Native: <span class="text-slate-300">${nativeCurrency}</span></span>
+              ${!isMetal ? `<span>Native: <span class="text-slate-300">${nativeCurrency}</span></span>` : ''}
+              ${isMetal && account.quantity_grams != null ? `<span>Quantity: <span class="text-slate-300">${Number(account.quantity_grams).toLocaleString()}g</span></span>` : ''}
               ${account.type === 'shares' && account.stock_code ? `<span>Ticker: <span class="text-slate-300">${escapeHtml(account.stock_code)}</span></span>` : ''}
               ${account.type === 'loan' && account.remaining_tenure != null ? `<span>Tenure: <span class="text-slate-300">${escapeHtml(account.remaining_tenure)} mo</span></span>` : ''}
             </div>
@@ -1326,7 +1357,9 @@ function renderAccountCard(account, { readOnly, typeColors }) {
         ${readOnly ? `
           <div class="text-xs text-slate-500 px-3 py-1.5 rounded-lg bg-slate-900/50 border border-slate-700/70">View only</div>` : `
           <div class="flex flex-wrap items-center gap-2">
-            <button onclick="viewHistory(${accountId})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">History</button>
+            ${!isMetal ? `<button onclick="openAddEntry(${accountId})" class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">+ Entry</button>` : ''}
+            ${!isMetal ? `<button onclick="viewHistory(${accountId})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">History</button>` : ''}
+            ${isMetal ? `<button data-refresh="${accountId}" onclick="refreshPrice(${accountId})" class="text-xs text-yellow-300 hover:text-white px-3 py-1.5 rounded-lg bg-slate-700/80 hover:bg-slate-700 transition-colors">↻ Refresh Price</button>` : ''}
             ${canExpand ? `<button onclick='toggleAccountDetails(${JSON.stringify(accountKey)})' class="text-xs text-slate-300 hover:text-white px-3 py-1.5 rounded-lg bg-slate-700/80 hover:bg-slate-700 transition-colors">${isExpanded ? 'Hide details' : 'Details'}</button>` : ''}
             <button onclick="openAccountModal(${accountId})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Edit</button>
             <button onclick="deleteAccount(${accountId})" class="text-xs text-rose-400 hover:text-rose-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Delete</button>
@@ -1352,11 +1385,13 @@ function renderAccounts() {
     loan: 'bg-orange-500/20 text-orange-400',
     shares: 'bg-indigo-500/20 text-indigo-400',
     investment_group: 'bg-blue-500/20 text-blue-400',
+    metal: 'bg-yellow-500/20 text-yellow-400',
   };
   const sections = [
     { type: 'bank', title: 'Bank Accounts', accent: 'text-emerald-300' },
     { type: 'shares', title: 'Shares', accent: 'text-indigo-300' },
     { type: 'investment_group', title: 'Investment Accounts', accent: 'text-blue-300' },
+    { type: 'metal', title: 'Metals', accent: 'text-yellow-300' },
     { type: 'loan', title: 'Loans', accent: 'text-orange-300' },
   ];
 
@@ -1403,10 +1438,42 @@ function renderAccounts() {
 
 function onAccTypeChange() {
   const type = document.getElementById('accType').value;
-  document.getElementById('accCurrencyRow').classList.toggle('hidden', type === 'shares');
+  document.getElementById('accCurrencyRow').classList.toggle('hidden', type === 'shares' || type === 'metal');
   document.getElementById('loanFields').classList.toggle('hidden', type !== 'loan');
   document.getElementById('shareFields').classList.toggle('hidden', type !== 'shares');
+  document.getElementById('metalFields').classList.toggle('hidden', type !== 'metal');
   if (type === 'shares') syncShareDefaultsFromExchange();
+}
+
+function setMetalType(type) {
+  document.getElementById('metalType').value = type;
+  const isGold = type === 'gold';
+  document.getElementById('metalGoldBtn').className =
+    'px-5 py-1.5 rounded-md text-sm font-medium transition-colors ' +
+    (isGold ? 'bg-yellow-500/20 text-yellow-300' : 'text-slate-400 hover:text-white');
+  document.getElementById('metalSilverBtn').className =
+    'px-5 py-1.5 rounded-md text-sm font-medium transition-colors ' +
+    (!isGold ? 'bg-slate-400/20 text-slate-200' : 'text-slate-400 hover:text-white');
+  // Show/hide holding type row (only relevant for gold)
+  document.getElementById('metalHoldingRow').classList.toggle('hidden', !isGold);
+}
+
+function setMetalHolding(type) {
+  document.getElementById('metalHolding').value = type;
+  const map = {
+    jewellery:   'metalHoldingJewellery',
+    digital_gold: 'metalHoldingDigital',
+    physical:    'metalHoldingPhysical',
+  };
+  Object.entries(map).forEach(([key, btnId]) => {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    const active = key === type;
+    btn.className = 'px-4 py-1.5 rounded-lg text-sm font-medium border transition-colors ' +
+      (active
+        ? 'border-yellow-500/40 bg-yellow-500/10 text-yellow-200'
+        : 'border-slate-600 text-slate-400 hover:text-white');
+  });
 }
 
 function syncShareDefaultsFromExchange(force = false) {
@@ -1435,9 +1502,11 @@ function openAccountModal(id = null) {
     document.getElementById('accCurrency').value = acc.currency || 'USD';
     const isLoan = acc.type === 'loan';
     const isShares = acc.type === 'shares';
-    document.getElementById('accCurrencyRow').classList.toggle('hidden', isShares);
+    const isMetal = acc.type === 'metal';
+    document.getElementById('accCurrencyRow').classList.toggle('hidden', isShares || isMetal);
     document.getElementById('loanFields').classList.toggle('hidden', !isLoan);
     document.getElementById('shareFields').classList.toggle('hidden', !isShares);
+    document.getElementById('metalFields').classList.toggle('hidden', !isMetal);
     if (isLoan) {
       document.getElementById('loanRate').value = acc.interest_rate ?? '';
       document.getElementById('loanTenure').value = acc.remaining_tenure ?? '';
@@ -1456,6 +1525,11 @@ function openAccountModal(id = null) {
         sharePurchaseCurrency.value = currency;
       }
     }
+    if (isMetal) {
+      setMetalType(acc.metal_type || 'gold');
+      setMetalHolding(acc.holding_type || 'jewellery');
+      document.getElementById('metalGrams').value = acc.quantity_grams ?? '';
+    }
   } else {
     document.getElementById('accName').value = '';
     document.getElementById('accType').value = 'bank';
@@ -1464,10 +1538,14 @@ function openAccountModal(id = null) {
     document.getElementById('accCurrencyRow').classList.remove('hidden');
     document.getElementById('loanFields').classList.add('hidden');
     document.getElementById('shareFields').classList.add('hidden');
-    ['loanRate', 'loanTenure', 'loanEMI', 'loanPrincipal', 'shareStockName', 'shareStockCode', 'shareQty', 'sharePurchasePrice'].forEach(id => {
-      document.getElementById(id).value = '';
+    document.getElementById('metalFields').classList.add('hidden');
+    ['loanRate', 'loanTenure', 'loanEMI', 'loanPrincipal', 'shareStockName', 'shareStockCode', 'shareQty', 'sharePurchasePrice', 'metalGrams'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.value = '';
     });
     document.getElementById('shareExchange').value = 'DFM';
+    setMetalType('gold');
+    setMetalHolding('jewellery');
     const sharePurchaseCurrency = document.getElementById('sharePurchasePriceCurrency');
     if (sharePurchaseCurrency) {
       syncShareDefaultsFromExchange(true);
@@ -1487,7 +1565,7 @@ async function saveAccount() {
   const saveBtn = document.getElementById('accountSaveBtn');
 
   const payload = { name, type, institution };
-  if (type !== 'shares') payload.currency = document.getElementById('accCurrency').value;
+  if (type !== 'shares' && type !== 'metal') payload.currency = document.getElementById('accCurrency').value;
   if (type === 'loan') {
     payload.interest_rate = parseFloat(document.getElementById('loanRate').value) || 0;
     payload.remaining_tenure = parseInt(document.getElementById('loanTenure').value) || 0;
@@ -1506,6 +1584,16 @@ async function saveAccount() {
     payload.quantity = parseFloat(document.getElementById('shareQty').value) || 0;
     payload.purchase_price = parseFloat(purchasePriceInput);
     payload.purchase_price_currency = shareExchangeCurrency(payload.exchange);
+  }
+  if (type === 'metal') {
+    const grams = parseFloat(document.getElementById('metalGrams').value) || 0;
+    if (!grams) { alert('Please enter the quantity in grams.'); return; }
+    payload.metal_type = document.getElementById('metalType').value;
+    payload.holding_type = payload.metal_type === 'gold'
+      ? document.getElementById('metalHolding').value
+      : null;
+    payload.quantity_grams = grams;
+    payload.currency = state.currency; // use display currency
   }
 
   if (saveBtn) {
@@ -2470,6 +2558,47 @@ init();
 
 const _ONBOARDING_KEY = 'sof_onboarding_v2';
 
+function _getStoredValue(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function _setStoredValue(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {}
+}
+
+function _featureAnnouncementKey() {
+  const userId = state.session?.user?.id || 'guest';
+  return `${FEATURE_ANNOUNCEMENT_KEY_PREFIX}_${userId}`;
+}
+
+function _markFeatureAnnouncementSeen() {
+  _setStoredValue(_featureAnnouncementKey(), new Date().toISOString());
+}
+
+function maybeShowNewFeatureAnnouncement() {
+  if (_getStoredValue(_featureAnnouncementKey())) return false;
+
+  alert([
+    'New features in State of Finance',
+    '',
+    '1. Zakaat page: calculate the Zakaat due from your cash, shares, gold, silver, deductions, Hawl date, and Nisab standard.',
+    '',
+    '2. Metals as assets: add gold and silver holdings from the Assets page. Gold can be Jewellery, Digital Gold, or Physical, and silver is tracked by grams.',
+    '',
+    'A short coach tour will highlight where to find these updates.'
+  ].join('\n'));
+
+  _markFeatureAnnouncementSeen();
+  setTimeout(startFeatureCoachMarks, 350);
+  return true;
+}
+
 // Each step: { tab, target (CSS selector|null), placement, title, desc, isLast }
 const COACH_STEPS = [
   {
@@ -2477,7 +2606,7 @@ const COACH_STEPS = [
     target: null,
     placement: 'center',
     title: '👋 Welcome to State of Finance',
-    desc: 'Your personal wealth tracker for households managing cash, investments, shares, and loans across currencies.\n\nThis quick tour walks through the current workflows so the coach marks match how the app works today. You can skip at any time.',
+    desc: 'Your personal wealth tracker for households managing cash, investments, shares, metals, and loans across currencies.\n\nThis quick tour walks through the current workflows, including the new Zakaat calculator and gold/silver asset tracking. You can skip at any time.',
   },
   {
     tab: 'dashboard',
@@ -2512,7 +2641,7 @@ const COACH_STEPS = [
     target: '#byTypeBreakdown',
     placement: 'top',
     title: '📊 Asset Type Breakdown',
-    desc: 'See how your wealth is split across Bank Accounts, Investment Accounts, Shares, and Loans.\n\nUse this to spot concentration, debt drag, or whether most of your net worth is sitting as cash instead of being allocated deliberately.',
+    desc: 'See how your wealth is split across Bank Accounts, Investment Accounts, Shares, Metals, and Loans.\n\nUse this to spot concentration, debt drag, or whether most of your net worth is sitting as cash instead of being allocated deliberately.',
   },
   {
     tab: 'dashboard',
@@ -2540,14 +2669,21 @@ const COACH_STEPS = [
     target: '[data-tab="accounts"]',
     placement: 'bottom',
     title: '🏛️ Assets Tab',
-    desc: 'Everything you own or owe lives here, grouped by type: Bank Accounts, Shares, Investment Accounts, and Loans.\n\nIn All Users mode, matching family assets are merged into view-only cards so you can review household totals without editing anyone else\'s data.',
+    desc: 'Everything you own or owe lives here, grouped by type: Bank Accounts, Shares, Investment Accounts, Metals, and Loans.\n\nIn All Users mode, matching family assets are merged into view-only cards so you can review household totals without editing anyone else\'s data.',
   },
   {
     tab: 'accounts',
     target: '#addAssetBtn',
     placement: 'bottom',
     title: '+ Add Asset',
-    desc: 'Create a bank account, investment account, share holding, or loan here.\n\nShares now capture exchange, ticker, quantity, and purchase price before the latest market price is fetched on save. Loans also store EMI, tenure, interest rate, and remaining principal.',
+    desc: 'Create a bank account, investment account, share holding, metal holding, or loan here.\n\nShares capture exchange, ticker, quantity, and purchase price before the latest market price is fetched on save. Loans store EMI, tenure, interest rate, and remaining principal.',
+  },
+  {
+    tab: 'accounts',
+    target: '#addAssetBtn',
+    placement: 'bottom',
+    title: '🥇 New: Gold And Silver Assets',
+    desc: 'Choose Metals from the asset type menu to add gold or silver holdings by grams.\n\nGold supports Jewellery, Digital Gold, and Physical holdings. Silver is tracked by grams. The app fetches metal prices and creates the current asset value automatically.',
   },
   {
     tab: 'accounts',
@@ -2627,6 +2763,20 @@ const COACH_STEPS = [
     desc: 'The white line is total net worth. The colored lines are the individual assets behind it.\n\nHover the chart to inspect exact values. Periods with no new update keep the last known balance so the trend stays readable between entries.',
   },
   {
+    tab: 'zakat',
+    target: '[data-tab="zakat"]',
+    placement: 'bottom',
+    title: '🕌 New: Zakaat Page',
+    desc: 'Open Zakaat to calculate the Zakaat due from your tracked cash, shares, gold, silver, and loan deductions.\n\nYou can set Hawl start date, choose the gold or silver Nisab standard, adjust the stock zakatable rate, and add extra holdings such as receivables or business inventory.',
+  },
+  {
+    tab: 'zakat',
+    target: '#tab-zakat',
+    placement: 'top',
+    title: '💚 Zakaat Due Summary',
+    desc: 'The summary shows total zakatable assets, deductions, Nisab value, eligibility, and the final 2.5% Zakaat due.\n\nGold and silver saved as asset holdings are pulled into this page automatically, while the manual inputs cover anything you have not added as an asset yet.',
+  },
+  {
     tab: 'dashboard',
     target: null,
     placement: 'center',
@@ -2636,23 +2786,104 @@ const COACH_STEPS = [
   },
 ];
 
-let _coachStep = 0;
+function _prepareFeatureCoachSurface(surface = 'default') {
+  if (surface !== 'metal-modal') {
+    closeModal('accountModal');
+    return;
+  }
 
-function startOnboarding() {
+  if (document.getElementById('accountModal')?.classList.contains('hidden')) {
+    openAccountModal();
+  }
+
+  const typeSelect = document.getElementById('accType');
+  if (typeSelect) {
+    typeSelect.value = 'metal';
+    onAccTypeChange();
+  }
+  setMetalType('gold');
+  setMetalHolding('physical');
+}
+
+const FEATURE_COACH_STEPS = [
+  {
+    tab: 'dashboard',
+    target: null,
+    placement: 'center',
+    title: '✨ What\'s New',
+    desc: 'Two new finance workflows are now available: a Zakaat page for calculating due Zakaat, and Metals as assets for adding gold and silver holdings.\n\nThis short coach tour shows where they live.',
+    beforeShow: () => _prepareFeatureCoachSurface(),
+  },
+  {
+    tab: 'zakat',
+    target: '[data-tab="zakat"]',
+    placement: 'bottom',
+    title: '🕌 Zakaat Calculator',
+    desc: 'The Zakaat page calculates due Zakaat using your cash, shares, gold, silver, deductions, Hawl date, and Nisab settings.\n\nIt keeps the calculation visible so you can review both eligibility and the final 2.5% amount.',
+    beforeShow: () => _prepareFeatureCoachSurface(),
+  },
+  {
+    tab: 'accounts',
+    target: '#addAssetBtn',
+    placement: 'bottom',
+    title: '🥇 Add Metals From Assets',
+    desc: 'Use Add Asset to create a Metals holding. For now, the platform supports gold and silver assets.',
+    beforeShow: () => _prepareFeatureCoachSurface(),
+  },
+  {
+    tab: 'accounts',
+    target: '#accType',
+    placement: 'right',
+    title: 'Select Metals',
+    desc: 'In the asset type list, choose Metals (Gold / Silver). That reveals the metal-specific inputs in the same Add Asset form.',
+    beforeShow: () => _prepareFeatureCoachSurface('metal-modal'),
+  },
+  {
+    tab: 'accounts',
+    target: '#metalFields',
+    placement: 'right',
+    title: 'Gold And Silver Details',
+    desc: 'Pick gold or silver, enter the quantity in grams, and save. Gold can be marked as Jewellery, Digital Gold, or Physical.\n\nThe saved metal asset is valued from live metal prices and is also included in the Zakaat calculation.',
+    beforeShow: () => _prepareFeatureCoachSurface('metal-modal'),
+    isLast: true,
+  },
+];
+
+let _coachStep = 0;
+let _activeCoachSteps = COACH_STEPS;
+let _activeCoachMode = 'onboarding';
+
+function startCoachTour(steps = COACH_STEPS, mode = 'onboarding') {
+  _activeCoachSteps = steps;
+  _activeCoachMode = mode;
   _coachStep = 0;
   document.getElementById('coachOverlay').classList.remove('hidden');
   _showCoachStep(0);
 }
 
+function startOnboarding() {
+  startCoachTour(COACH_STEPS, 'onboarding');
+}
+
+function startFeatureCoachMarks() {
+  startCoachTour(FEATURE_COACH_STEPS, 'features');
+}
+
 function skipOnboarding() {
   document.getElementById('coachOverlay').classList.add('hidden');
-  localStorage.setItem(_ONBOARDING_KEY, '1');
+  if (_activeCoachMode === 'onboarding') _setStoredValue(_ONBOARDING_KEY, '1');
+  if (_activeCoachMode === 'features') {
+    _markFeatureAnnouncementSeen();
+    closeModal('accountModal');
+  }
+  _activeCoachSteps = COACH_STEPS;
+  _activeCoachMode = 'onboarding';
   // Return to dashboard
   switchTab('dashboard');
 }
 
 function nextCoachStep() {
-  if (_coachStep >= COACH_STEPS.length - 1) {
+  if (_coachStep >= _activeCoachSteps.length - 1) {
     skipOnboarding();
     return;
   }
@@ -2667,15 +2898,20 @@ function prevCoachStep() {
 }
 
 function _showCoachStep(index) {
-  const step = COACH_STEPS[index];
+  const step = _activeCoachSteps[index];
+  if (!step) {
+    skipOnboarding();
+    return;
+  }
   // Switch tab first, then position after DOM settles
   if (step.tab) switchTab(step.tab);
-  const delay = step.tab ? 160 : 0;
+  if (typeof step.beforeShow === 'function') step.beforeShow();
+  const delay = step.tab || step.beforeShow ? 180 : 0;
   setTimeout(() => _renderCoachStep(step, index), delay);
 }
 
 function _renderCoachStep(step, index) {
-  const total = COACH_STEPS.length;
+  const total = _activeCoachSteps.length;
   const overlay  = document.getElementById('coachOverlay');
   const spotlight = document.getElementById('coachSpotlight');
   const card     = document.getElementById('coachCard');
@@ -2783,8 +3019,337 @@ function _renderCoachStep(step, index) {
 // ── Auto-start for first-time users ──────────────────────────────────────────
 // Called from checkSession() after a successful login
 function _maybeStartOnboarding() {
-  if (!localStorage.getItem(_ONBOARDING_KEY)) {
+  if (!_getStoredValue(_ONBOARDING_KEY)) {
     setTimeout(startOnboarding, 600);
+  }
+}
+
+// ── Zakaat ────────────────────────────────────────────────────────────────────
+
+let _zakatSaveTimer = null;
+
+async function loadZakat() {
+  const container = document.getElementById('tab-zakat');
+  if (!container) return;
+  container.innerHTML = `<div class="text-slate-500 text-sm py-8 text-center">Loading Zakaat data…</div>`;
+
+  try {
+    const [settings, summary] = await Promise.all([
+      api('/api/zakat/settings'),
+      api('/api/zakat/summary'),
+    ]);
+    renderZakat(settings, summary);
+  } catch (e) {
+    container.innerHTML = `<div class="text-rose-400 text-sm py-8 text-center">Failed to load Zakaat data: ${e.message}</div>`;
+  }
+}
+
+function renderZakat(settings, summary) {
+  const container = document.getElementById('tab-zakat');
+  if (!container) return;
+
+  const cur = summary.currency || 'AED';
+  const fmt = (v) => moneyInCurrency(v, cur);
+  const nisabGold   = summary.nisab_standard === 'gold';
+  const stocks100   = summary.stocks_rate >= 0.99;
+  const hawlOk      = summary.hawl_status === 'due';
+
+  const eligibleBadge = summary.eligible
+    ? `<span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/15 text-emerald-300 text-xs font-semibold">✓ Eligible for Zakaat</span>`
+    : `<span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-700 text-slate-400 text-xs font-semibold">✗ Below Nisab — Not Eligible</span>`;
+
+  const hawlBadge = hawlOk
+    ? `<span class="text-xs text-emerald-400">✓ Hawl completed</span>`
+    : summary.hawl_status === 'soon'
+      ? `<span class="text-xs text-amber-400">⏳ Hawl in ${summary.days_until_hawl} days</span>`
+      : summary.hawl_date
+        ? `<span class="text-xs text-slate-400">📅 Hawl in ${summary.days_until_hawl} days</span>`
+        : `<span class="text-xs text-slate-500">Hawl date not set</span>`;
+
+  container.innerHTML = `
+    <!-- Settings card -->
+    <div class="bg-slate-800 rounded-xl p-5 mb-5">
+      <h2 class="text-sm font-medium text-slate-400 mb-4 uppercase tracking-wide">Zakaat Settings</h2>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+
+        <!-- Hawl date -->
+        <div>
+          <label class="text-xs text-slate-400 block mb-1">Hawl Start Date</label>
+          <input id="zakatHawlDate" type="date" value="${settings.hawl_date || ''}"
+            class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
+            onchange="saveZakatSetting('hawl_date', this.value)" />
+          <p class="text-xs text-slate-500 mt-1">One lunar year (354 days) must pass for Zakaat to be due.</p>
+        </div>
+
+        <!-- Nisab standard toggle -->
+        <div>
+          <label class="text-xs text-slate-400 block mb-2">Nisab Standard</label>
+          <div class="bg-slate-700 rounded-lg p-0.5 flex w-fit">
+            <button id="nisabGoldBtn" onclick="setNisabStandard('gold')"
+              class="px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${nisabGold ? 'bg-yellow-500/20 text-yellow-300' : 'text-slate-400 hover:text-white'}">
+              🥇 Gold
+            </button>
+            <button id="nisabSilverBtn" onclick="setNisabStandard('silver')"
+              class="px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${!nisabGold ? 'bg-slate-500/30 text-slate-200' : 'text-slate-400 hover:text-white'}">
+              🥈 Silver
+            </button>
+          </div>
+          <p class="text-xs text-slate-500 mt-1">
+            ${nisabGold
+              ? `Gold: 87.48g — Nisab ≈ ${fmt(summary.nisab_value)}`
+              : `Silver: 612.36g — Nisab ≈ ${fmt(summary.nisab_value)}`}
+          </p>
+        </div>
+
+        <!-- Stocks rate toggle -->
+        <div>
+          <label class="text-xs text-slate-400 block mb-2">Zakatable Stocks Rate</label>
+          <div class="bg-slate-700 rounded-lg p-0.5 flex w-fit">
+            <button id="stocks25Btn" onclick="setStocksRate(0.25)"
+              class="px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${!stocks100 ? 'bg-indigo-500/20 text-indigo-300' : 'text-slate-400 hover:text-white'}">
+              25%
+            </button>
+            <button id="stocks100Btn" onclick="setStocksRate(1.0)"
+              class="px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${stocks100 ? 'bg-indigo-500/20 text-indigo-300' : 'text-slate-400 hover:text-white'}">
+              100%
+            </button>
+          </div>
+          <p class="text-xs text-slate-500 mt-1">
+            ${stocks100 ? 'Full stock value is zakatable.' : '25% of stock value (for trading portfolios).'}
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Two-column layout: Inputs + Auto-pulled -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5">
+
+      <!-- Manual inputs card -->
+      <div class="bg-slate-800 rounded-xl p-5">
+        <h2 class="text-sm font-medium text-slate-400 mb-4 uppercase tracking-wide">Your Holdings</h2>
+        <div class="space-y-4">
+
+          <!-- Gold grams -->
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Total Gold (grams)</label>
+            <input id="zakatGoldGrams" type="number" min="0" step="0.1"
+              value="${settings.gold_grams || 0}"
+              class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
+              onchange="saveZakatSetting('gold_grams', parseFloat(this.value)||0)" />
+          </div>
+
+          <!-- Jewellery grams -->
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">
+              Of which Personal Jewellery (grams)
+              <span class="text-slate-500 ml-1 font-normal">— deducted from total gold</span>
+            </label>
+            <input id="zakatJewelleryGrams" type="number" min="0" step="0.1"
+              value="${settings.gold_jewellery_grams || 0}"
+              class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
+              onchange="saveZakatSetting('gold_jewellery_grams', parseFloat(this.value)||0)" />
+            <p class="text-xs text-slate-500 mt-1">
+              Investable gold: ${summary.gold_investable_grams || 0}g
+              × ${fmt(summary.gold_price_per_gram)}/g = ${fmt(summary.assets.gold)}
+            </p>
+          </div>
+
+          <!-- Silver grams -->
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Silver (grams)</label>
+            <input id="zakatSilverGrams" type="number" min="0" step="0.1"
+              value="${settings.silver_grams || 0}"
+              class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
+              onchange="saveZakatSetting('silver_grams', parseFloat(this.value)||0)" />
+            <p class="text-xs text-slate-500 mt-1">
+              ${summary.silver_grams || 0}g × ${fmt(summary.silver_price_per_gram)}/g = ${fmt(summary.assets.silver)}
+            </p>
+          </div>
+
+          <!-- Business goods -->
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Business Goods / Inventory (${cur})</label>
+            <input id="zakatBusinessGoods" type="number" min="0" step="0.01"
+              value="${settings.business_goods || 0}"
+              class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
+              onchange="saveZakatSetting('business_goods', parseFloat(this.value)||0)" />
+          </div>
+
+          <!-- Receivables -->
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Money Owed to You / Receivables (${cur})</label>
+            <input id="zakatReceivables" type="number" min="0" step="0.01"
+              value="${settings.receivables || 0}"
+              class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
+              onchange="saveZakatSetting('receivables', parseFloat(this.value)||0)" />
+          </div>
+
+          <!-- Pension -->
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Accessible Pension / Retirement (${cur})</label>
+            <input id="zakatPension" type="number" min="0" step="0.01"
+              value="${settings.pension || 0}"
+              class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
+              onchange="saveZakatSetting('pension', parseFloat(this.value)||0)" />
+          </div>
+        </div>
+      </div>
+
+      <!-- Auto-pulled data card -->
+      <div class="bg-slate-800 rounded-xl p-5">
+        <h2 class="text-sm font-medium text-slate-400 mb-4 uppercase tracking-wide">From Your Accounts</h2>
+        <div class="space-y-3">
+
+          <div class="flex items-center justify-between py-3 border-b border-slate-700">
+            <div>
+              <p class="text-sm text-slate-200">Cash &amp; Savings</p>
+              <p class="text-xs text-slate-500 mt-0.5">Sum of all bank account balances</p>
+            </div>
+            <span class="text-sm font-semibold text-white">${fmt(summary.assets.cash)}</span>
+          </div>
+
+          <div class="flex items-center justify-between py-3 border-b border-slate-700">
+            <div>
+              <p class="text-sm text-slate-200">Stocks &amp; Shares</p>
+              <p class="text-xs text-slate-500 mt-0.5">
+                Full value ${fmt(summary.assets.stocks_full)} × ${Math.round((summary.stocks_rate||0.25)*100)}% rate
+              </p>
+            </div>
+            <span class="text-sm font-semibold text-white">${fmt(summary.assets.stocks)}</span>
+          </div>
+
+          <div class="flex items-center justify-between py-3 border-b border-slate-700">
+            <div>
+              <p class="text-sm text-slate-200 text-rose-300">Loan Deduction</p>
+              <p class="text-xs text-slate-500 mt-0.5">Annual EMI payments (EMI × 12)</p>
+            </div>
+            <span class="text-sm font-semibold text-rose-300">−${fmt(summary.deductions.loans)}</span>
+          </div>
+
+          <!-- Metal prices info -->
+          <div class="rounded-xl border border-slate-700 bg-slate-900/40 px-4 py-3 mt-2">
+            <p class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Live Metal Prices (USD/gram)</p>
+            <div class="flex gap-6">
+              <div>
+                <p class="text-xs text-slate-500">Gold</p>
+                <p class="text-sm text-yellow-300 font-medium">$${(summary.gold_price_per_gram||0).toFixed(2)}</p>
+              </div>
+              <div>
+                <p class="text-xs text-slate-500">Silver</p>
+                <p class="text-sm text-slate-200 font-medium">$${(summary.silver_price_per_gram||0).toFixed(2)}</p>
+              </div>
+            </div>
+            <p class="text-xs text-slate-600 mt-2">Prices cached daily from Yahoo Finance. Fallback prices used if unavailable.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Summary card -->
+    <div class="bg-slate-800 rounded-xl p-6 mb-5">
+      <div class="flex items-center justify-between mb-5">
+        <h2 class="text-sm font-medium text-slate-400 uppercase tracking-wide">Zakaat Summary</h2>
+        <div class="flex items-center gap-3">
+          ${hawlBadge}
+          ${eligibleBadge}
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        <div class="bg-slate-900/50 rounded-xl p-4">
+          <p class="text-xs text-slate-500 mb-1">Total Assets</p>
+          <p class="text-lg font-semibold text-white">${fmt(summary.assets.total)}</p>
+        </div>
+        <div class="bg-slate-900/50 rounded-xl p-4">
+          <p class="text-xs text-slate-500 mb-1">Loan Deductions</p>
+          <p class="text-lg font-semibold text-rose-300">${fmt(summary.deductions.total)}</p>
+        </div>
+        <div class="bg-slate-900/50 rounded-xl p-4">
+          <p class="text-xs text-slate-500 mb-1">Net Zakatable</p>
+          <p class="text-lg font-semibold text-white">${fmt(summary.net_zakatable)}</p>
+        </div>
+        <div class="bg-slate-900/50 rounded-xl p-4">
+          <p class="text-xs text-slate-500 mb-1">Nisab (${nisabGold ? 'Gold' : 'Silver'})</p>
+          <p class="text-lg font-semibold text-white">${fmt(summary.nisab_value)}</p>
+        </div>
+      </div>
+
+      <div class="border-t border-slate-700 pt-5 flex items-center justify-between">
+        <div>
+          <p class="text-sm text-slate-400">Zakaat Due <span class="text-slate-500 text-xs ml-1">(2.5% of net zakatable wealth)</span></p>
+          ${!summary.eligible ? `<p class="text-xs text-slate-500 mt-1">Net zakatable is below the nisab threshold — no Zakaat due.</p>` : ''}
+        </div>
+        <p class="text-3xl font-bold ${summary.eligible ? 'text-emerald-300' : 'text-slate-500'}">
+          ${summary.eligible ? fmt(summary.zakat_due) : fmt(0)}
+        </p>
+      </div>
+    </div>
+
+    <!-- Assets breakdown table -->
+    <div class="bg-slate-800 rounded-xl p-5">
+      <h2 class="text-sm font-medium text-slate-400 mb-4 uppercase tracking-wide">Full Asset Breakdown</h2>
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-left text-xs text-slate-500 border-b border-slate-700">
+            <th class="pb-2 font-medium">Category</th>
+            <th class="pb-2 font-medium text-right">Amount (${cur})</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-700/50">
+          ${[
+            ['Cash & Savings', summary.assets.cash, false],
+            [`Stocks (${Math.round((summary.stocks_rate||0.25)*100)}% rate)`, summary.assets.stocks, false],
+            ['Gold (investable)', summary.assets.gold, false],
+            ['Silver', summary.assets.silver, false],
+            ['Business Goods', summary.assets.business, false],
+            ['Receivables', summary.assets.receivables, false],
+            ['Pension', summary.assets.pension, false],
+          ].filter(([,v]) => v > 0).map(([label, val]) =>
+            `<tr><td class="py-2.5 text-slate-300">${label}</td><td class="py-2.5 text-right text-white font-medium">${fmt(val)}</td></tr>`
+          ).join('')}
+          <tr class="border-t border-slate-600">
+            <td class="pt-3 pb-2.5 text-slate-200 font-semibold">Total Assets</td>
+            <td class="pt-3 pb-2.5 text-right text-white font-bold">${fmt(summary.assets.total)}</td>
+          </tr>
+          <tr>
+            <td class="py-2.5 text-rose-300">Loan Deductions (EMI × 12)</td>
+            <td class="py-2.5 text-right text-rose-300 font-medium">−${fmt(summary.deductions.loans)}</td>
+          </tr>
+          <tr class="border-t-2 border-indigo-500/40">
+            <td class="pt-3 pb-2.5 text-slate-100 font-bold">Net Zakatable Wealth</td>
+            <td class="pt-3 pb-2.5 text-right text-white font-bold text-base">${fmt(summary.net_zakatable)}</td>
+          </tr>
+          ${summary.eligible ? `
+          <tr class="bg-emerald-500/5">
+            <td class="py-3 text-emerald-300 font-bold">Zakaat Due (2.5%)</td>
+            <td class="py-3 text-right text-emerald-300 font-bold text-lg">${fmt(summary.zakat_due)}</td>
+          </tr>` : ''}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function setNisabStandard(standard) {
+  saveZakatSetting('nisab_standard', standard, true);
+}
+
+function setStocksRate(rate) {
+  saveZakatSetting('stocks_rate', rate, true);
+}
+
+async function saveZakatSetting(key, value, reloadNow = false) {
+  try {
+    await api('/api/zakat/settings', 'PATCH', { [key]: value });
+    if (reloadNow) {
+      loadZakat();
+    } else {
+      // Debounce reload for input fields
+      clearTimeout(_zakatSaveTimer);
+      _zakatSaveTimer = setTimeout(loadZakat, 800);
+    }
+  } catch (e) {
+    console.error('Failed to save zakat setting:', e);
   }
 }
 

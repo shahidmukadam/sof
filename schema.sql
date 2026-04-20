@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS share_details (
 CREATE TABLE IF NOT EXISTS balance_entries (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id     INTEGER NOT NULL REFERENCES accounts(id),
-    amount         REAL NOT NULL,
+    amount         TEXT NOT NULL DEFAULT '0',
     note           TEXT,
     recorded_at    TEXT NOT NULL DEFAULT (datetime('now')),
     transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL
@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS bucket_allocations (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     balance_entry_id INTEGER NOT NULL REFERENCES balance_entries(id) ON DELETE CASCADE,
     bucket_id        INTEGER NOT NULL REFERENCES buckets(id) ON DELETE CASCADE,
-    amount           REAL NOT NULL,
+    amount           TEXT NOT NULL,
     UNIQUE(balance_entry_id, bucket_id)
 );
 
@@ -107,6 +107,22 @@ CREATE TABLE IF NOT EXISTS local_otp_outbox (
     expires_at        TEXT NOT NULL,
     resend_allowed_at TEXT NOT NULL,
     created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS zakat_settings (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id              INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    hawl_date            TEXT,
+    nisab_standard       TEXT NOT NULL DEFAULT 'gold',
+    stocks_rate          REAL NOT NULL DEFAULT 0.25,
+    gold_grams           REAL NOT NULL DEFAULT 0,
+    gold_jewellery_grams REAL NOT NULL DEFAULT 0,
+    silver_grams         REAL NOT NULL DEFAULT 0,
+    business_goods       REAL NOT NULL DEFAULT 0,
+    receivables          REAL NOT NULL DEFAULT 0,
+    pension              REAL NOT NULL DEFAULT 0,
+    created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS transactions (

@@ -5,3 +5,10 @@ finance.db
 *.db-wal
 *.db-journal
 __pycache__/
+build/
+dist/
+release/
+.venv-windows-package/
+.claude/
+state-of-finance-webapp-clean*/
+*.zip
