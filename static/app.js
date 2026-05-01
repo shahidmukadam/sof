@@ -1210,7 +1210,6 @@ function renderExpandedAssetDetails(account, { readOnly = false, accountKey, num
               <p class="text-[11px] uppercase tracking-[0.24em] text-orange-300/80">Loan Details</p>
               <p class="text-xs text-slate-500">Expanded repayment information.</p>
             </div>
-            ${readOnly ? '' : `<button id="emi-btn-${numericAccountId}" onclick="applyEmi(${numericAccountId})" class="text-xs text-orange-300 hover:text-white px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 transition-colors">Pay EMI</button>`}
           </div>
           <div class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm text-slate-300">
             <div>Native Currency</div>
@@ -1359,6 +1358,7 @@ function renderAccountCard(account, { readOnly, typeColors }) {
           <div class="flex flex-wrap items-center gap-2">
             ${!isMetal ? `<button onclick="openAddEntry(${accountId})" class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">+ Entry</button>` : ''}
             ${!isMetal ? `<button onclick="viewHistory(${accountId})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">History</button>` : ''}
+            ${isLoan ? `<button id="emi-btn-${accountId}" onclick="applyEmi(${accountId})" class="text-xs text-orange-300 hover:text-white px-3 py-1.5 rounded-lg bg-slate-700/80 hover:bg-slate-700 transition-colors">Pay EMI</button>` : ''}
             ${isMetal ? `<button data-refresh="${accountId}" onclick="refreshPrice(${accountId})" class="text-xs text-yellow-300 hover:text-white px-3 py-1.5 rounded-lg bg-slate-700/80 hover:bg-slate-700 transition-colors">↻ Refresh Price</button>` : ''}
             ${canExpand ? `<button onclick='toggleAccountDetails(${JSON.stringify(accountKey)})' class="text-xs text-slate-300 hover:text-white px-3 py-1.5 rounded-lg bg-slate-700/80 hover:bg-slate-700 transition-colors">${isExpanded ? 'Hide details' : 'Details'}</button>` : ''}
             <button onclick="openAccountModal(${accountId})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Edit</button>
