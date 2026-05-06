@@ -187,6 +187,12 @@ class _Base(unittest.TestCase):
     def _net_worth(self):
         return self._j(self._get('/api/summary/net-worth'))
 
+    def _apply_emi(self, loan_id, source_account_id=None):
+        body = {}
+        if source_account_id is not None:
+            body['source_account_id'] = source_account_id
+        return self._post(f'/api/accounts/{loan_id}/apply-emi', body)
+
 
 # =============================================================================
 # 1 · Assets CRUD
@@ -353,6 +359,69 @@ class TestLoanAccountDetails(_Base):
         nw = self._net_worth()
         self.assertIn('loan', nw['by_type'])
         self.assertLess(nw['by_type']['loan'], 0)
+
+    def test_apply_emi_requires_source_bank_account(self):
+        loan = self._loan(principal=10000.0, emi=500.0)
+        r = self._apply_emi(loan['id'])
+        self.assertEqual(400, r.status_code)
+
+    def test_apply_emi_reduces_loan_principal_and_debits_selected_bank_account(self):
+        bank = self._bank(currency='AED')
+        self._entry(bank['id'], 1000.0)
+        loan = self._loan(principal=1200.0, emi=500.0, rate=12.0, tenure=12, currency='AED')
+
+        result = self._j(self._apply_emi(loan['id'], bank['id']))
+
+        self.assertAlmostEqual(12.0, result['interest'], places=2)
+        self.assertAlmostEqual(488.0, result['principal_paid'], places=2)
+        self.assertAlmostEqual(712.0, result['new_principal'], places=2)
+        self.assertEqual(11, result['new_tenure'])
+        self.assertAlmostEqual(500.0, result['source_debit_amount'], places=2)
+        self.assertAlmostEqual(500.0, result['source_account']['latest_balance'], places=2)
+        self.assertAlmostEqual(712.0, result['account']['remaining_principal'], places=2)
+
+        bank_entries = self._j(self._get(f'/api/balances?account_id={bank["id"]}'))
+        latest_bank = sorted(bank_entries, key=lambda e: e['id'], reverse=True)[0]
+        self.assertAlmostEqual(500.0, latest_bank['amount'], places=2)
+        self.assertIn('Loan EMI', latest_bank['note'])
+
+    def test_apply_emi_uses_fx_rate_when_bank_currency_differs_from_loan_currency(self):
+        bank = self._bank(currency='AED')
+        self._entry(bank['id'], 500.0)
+        loan = self._loan(principal=1000.0, emi=50.0, rate=12.0, tenure=10, currency='USD')
+
+        with patch.object(_mod, '_fetch_usd_rates', return_value=_RATES):
+            result = self._j(self._apply_emi(loan['id'], bank['id']))
+
+        self.assertAlmostEqual(200.0, result['source_debit_amount'], places=2)
+        self.assertAlmostEqual(300.0, result['source_account']['latest_balance'], places=2)
+        self.assertAlmostEqual(960.0, result['new_principal'], places=2)
+
+    def test_apply_emi_carries_forward_manual_bucket_allocations_on_bank_debit(self):
+        bank = self._bank(currency='USD')
+        bucket = self._bucket('EMI Reserve', target=1000.0)
+        self._entry(bank['id'], 1200.0, allocations=[{'bucket_id': bucket['id'], 'amount': 300.0}])
+        loan = self._loan(principal=800.0, emi=200.0, rate=0.0, tenure=4, currency='USD')
+
+        self._apply_emi(loan['id'], bank['id'])
+
+        with sqlite3.connect(_DB_FILE.name) as conn:
+            conn.row_factory = sqlite3.Row
+            latest_bank_entry = conn.execute("""
+                SELECT id
+                FROM balance_entries
+                WHERE account_id=?
+                ORDER BY id DESC
+                LIMIT 1
+            """, (bank['id'],)).fetchone()
+            allocation_rows = conn.execute("""
+                SELECT amount
+                FROM bucket_allocations
+                WHERE balance_entry_id=?
+            """, (latest_bank_entry['id'],)).fetchall()
+
+        self.assertEqual(1, len(allocation_rows))
+        self.assertAlmostEqual(300.0, float(_mod._dec_num(allocation_rows[0]['amount'])), places=2)
 
 
 # =============================================================================
@@ -899,12 +968,26 @@ class TestNetWorthSummary(_Base):
         nw = self._net_worth()
         self.assertAlmostEqual(3000.0, nw['unallocated_cash'], places=2)
 
+    def test_unallocated_cash_ignores_investment_group_balances(self):
+        bank = self._bank()
+        inv = self._investment()
+        self._entry(bank['id'], 5000.0)
+        self._entry(inv['id'], 7000.0)
+        nw = self._net_worth()
+        self.assertAlmostEqual(5000.0, nw['unallocated_cash'], places=2)
+
+    def test_unallocated_cash_does_not_subtract_loans(self):
+        bank = self._bank()
+        self._entry(bank['id'], 5000.0)
+        self._loan(principal=3000.0)
+        nw = self._net_worth()
+        self.assertAlmostEqual(5000.0, nw['unallocated_cash'], places=2)
+
     def test_account_with_no_balance_entries_contributes_nothing_to_net_worth(self):
         self._bank('No Entries')
         nw = self._net_worth()
         self.assertAlmostEqual(0.0, nw['total'], places=2)
         self.assertEqual({}, nw['by_type'])
-
 
 # =============================================================================
 # 9 · Timeline Summary

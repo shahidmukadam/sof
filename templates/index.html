@@ -582,6 +582,46 @@
       </div>
     </div>
 
+    <div id="emiModal" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 hidden">
+      <div class="bg-slate-800 rounded-2xl p-6 w-full max-w-md mx-4 shadow-xl">
+        <div class="flex items-center justify-between mb-2">
+          <h3 id="emiModalTitle" class="text-lg font-semibold">Pay EMI</h3>
+          <button onclick="closeModal('emiModal')" class="text-slate-400 hover:text-white text-xl leading-none">&times;</button>
+        </div>
+        <p id="emiLoanHint" class="text-sm text-slate-400 mb-5">Select the bank account to debit for this EMI.</p>
+        <div class="space-y-4">
+          <div>
+            <label class="text-xs text-slate-400 block mb-1">Debit From *</label>
+            <select id="emiSourceAccount" onchange="updateEmiPaymentPreview()" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500">
+              <option value="">-- select bank account --</option>
+            </select>
+          </div>
+
+          <div class="space-y-2 rounded-xl border border-slate-700 bg-slate-900/40 p-4">
+            <div class="flex items-center justify-between gap-3 text-sm">
+              <span class="text-slate-400">EMI to apply</span>
+              <span id="emiPreviewLoanAmount" class="text-white font-medium">--</span>
+            </div>
+            <div class="flex items-center justify-between gap-3 text-sm">
+              <span class="text-slate-400">Bank debit</span>
+              <span id="emiPreviewDebitAmount" class="text-orange-300 font-medium">--</span>
+            </div>
+            <div class="flex items-center justify-between gap-3 text-sm">
+              <span class="text-slate-400">Balance after debit</span>
+              <span id="emiPreviewRemainingBalance" class="text-slate-200 font-medium">--</span>
+            </div>
+            <p id="emiFxHint" class="text-xs text-slate-500 min-h-[1rem]"></p>
+          </div>
+
+          <p id="emiError" class="text-xs text-rose-400 min-h-[1rem]"></p>
+        </div>
+        <div class="flex gap-3 mt-6">
+          <button onclick="closeModal('emiModal')" class="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded-lg text-sm transition-colors">Cancel</button>
+          <button id="emiConfirmBtn" onclick="applyEmi()" class="flex-1 bg-orange-600 hover:bg-orange-500 py-2 rounded-lg text-sm font-medium transition-colors">Pay EMI</button>
+        </div>
+      </div>
+    </div>
+
     <div id="transactionModal" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 hidden">
       <div class="bg-slate-800 rounded-2xl p-6 w-full max-w-md mx-4 shadow-xl">
         <h3 class="text-lg font-semibold mb-5">New Transaction</h3>
@@ -694,6 +734,29 @@
     </div>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script>
+    if (window.location.protocol === 'file:') {
+      document.body.innerHTML = `
+        <div class="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6">
+          <div class="w-full max-w-xl rounded-2xl border border-amber-500/30 bg-slate-900 shadow-2xl p-8">
+            <p class="text-xs font-semibold uppercase tracking-[0.24em] text-amber-300 mb-3">Wrong Launch Mode</p>
+            <h1 class="text-2xl font-semibold mb-3">Open State of Finance from the local server</h1>
+            <p class="text-sm text-slate-300 leading-relaxed mb-6">
+              This file is only the HTML template. Interactive features like sign-in, coach marks, transactions,
+              share refresh, and the EMI account picker work only when the Flask app is running.
+            </p>
+            <div class="space-y-3 text-sm text-slate-300">
+              <p>Use this URL instead:</p>
+              <a href="http://127.0.0.1:5050" class="inline-flex items-center rounded-lg bg-indigo-600 hover:bg-indigo-500 px-4 py-2 font-medium text-white transition-colors">
+                http://127.0.0.1:5050
+              </a>
+              <p class="text-slate-400">If the app was already open there, do a hard refresh after restarting the server.</p>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+  </script>
+  <script src="/static/app.js?v={{ app_js_version }}"></script>
 </body>
 </html>

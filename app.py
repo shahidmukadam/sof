@@ -2189,7 +2189,7 @@ def _cash_position_summary(db, user_id=None, family_id=None, rates=None):
         'bank_cash_total': bank_cash_total,
         'loan_total': loan_total,
         'allocated_total': allocated_total,
-        'unallocated_cash': max(0.0, bank_cash_total - loan_total - allocated_total),
+        'unallocated_cash': max(0.0, bank_cash_total - allocated_total),
     }
 
 
@@ -2585,7 +2585,12 @@ def _execute_transaction(db, user_id, txn_type, amount,
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    app_js_path = os.path.join(app.static_folder, 'app.js')
+    try:
+        app_js_version = int(os.path.getmtime(app_js_path))
+    except OSError:
+        app_js_version = 1
+    return render_template('index.html', app_js_version=app_js_version)
 
 
 @app.route('/healthz')
@@ -3232,10 +3237,21 @@ def refresh_stock_price(aid):
 @app.route('/api/accounts/<int:aid>/apply-emi', methods=['POST'])
 @login_required
 def apply_loan_emi(aid):
+    payload = request.get_json(silent=True) or {}
     db = get_db()
     account = _owned_account(db, aid)
     if not account or account['type'] != 'loan':
         return _json_error('Not a loan account', 400)
+
+    source_account_id = payload.get('source_account_id')
+    try:
+        source_account_id = int(source_account_id)
+    except (TypeError, ValueError):
+        return _json_error('Select the bank account to debit for this EMI', 400)
+
+    source_account = _owned_account(db, source_account_id)
+    if not source_account or source_account['type'] != 'bank':
+        return _json_error('Selected source account must be an active bank account', 400)
 
     ld = db.execute(
         "SELECT interest_rate, remaining_tenure, monthly_emi, remaining_principal FROM loan_details WHERE account_id=?",
@@ -3254,28 +3270,60 @@ def apply_loan_emi(aid):
     if emi <= 0:
         return _json_error('Monthly EMI is not set', 400)
 
+    rates = _fetch_usd_rates()
+    loan_currency = _account_currency(account)
+    source_currency = _account_currency(source_account)
+    source_debit_amount = round(_convert_currency_amount(emi, loan_currency, source_currency, rates=rates), 2)
+    source_balance_before = _get_latest_balance(db, source_account_id)
+    if source_debit_amount - source_balance_before > 1e-9:
+        return _json_error(
+            f'Insufficient balance in {_dec(source_account["name"]) or "the selected bank account"}. '
+            f'Available: {source_balance_before:.2f} {source_currency}; '
+            f'needed: {source_debit_amount:.2f} {source_currency}.',
+            400
+        )
+
     monthly_rate      = annual_rate / 12 / 100
     interest_component = round(principal * monthly_rate, 2)
     principal_component = round(max(emi - interest_component, 0), 2)
     new_principal      = round(max(principal - principal_component, 0), 2)
     new_tenure         = tenure - 1
+    source_balance_after = round(source_balance_before - source_debit_amount, 2)
 
     db.execute(
         "UPDATE loan_details SET remaining_principal=?, remaining_tenure=? WHERE account_id=?",
         (new_principal, new_tenure, aid)
     )
+    source_account_name = _dec(source_account['name']) or 'Bank account'
     note = (
         f'EMI payment — principal {_fmt_amount(principal_component)}, '
         f'interest {_fmt_amount(interest_component)}'
+        + f', paid from {source_account_name}'
         + (' (LOAN CLOSED)' if new_principal <= 0 else f', {new_tenure} months remaining')
     )
     db.execute(
         "INSERT INTO balance_entries (account_id, amount, note) VALUES (?,?,?)",
         (aid, _enc(-new_principal), _enc(note))
     )
+
+    bank_note = (
+        f'Loan EMI → {_dec(account["name"]) or "Loan"}'
+        + (f' ({_fmt_amount(emi)} {loan_currency})' if loan_currency != source_currency else '')
+    )
+    _create_txn_balance_entry(
+        db,
+        source_account_id,
+        source_balance_after,
+        None,
+        bank_note,
+    )
+    if _has_auto_buckets(db, current_finance_user_id()):
+        _auto_allocate_buckets(db, current_finance_user_id())
+
     db.commit()
 
     row = db.execute(_ACCOUNT_SELECT + " WHERE a.id=?", (aid,)).fetchone()
+    source_row = db.execute(_ACCOUNT_SELECT + " WHERE a.id=?", (source_account_id,)).fetchone()
     return jsonify({
         'ok': True,
         'emi': emi,
@@ -3283,7 +3331,10 @@ def apply_loan_emi(aid):
         'principal_paid': principal_component,
         'new_principal': new_principal,
         'new_tenure': new_tenure,
-        'account': _serialize_account_row(row, rates=_fetch_usd_rates()),
+        'source_debit_amount': source_debit_amount,
+        'source_balance_after': source_balance_after,
+        'account': _serialize_account_row(row, rates=rates),
+        'source_account': _serialize_account_row(source_row, rates=rates),
     })
 
 

@@ -9,6 +9,7 @@ const state = {
   editingBucketId: null,
   allocatingBucketId: null,
   manualAllocateContext: null,
+  emiPaymentContext: null,
   expandedAccounts: {},
   accountActivity: {},
   accountActivityLoading: {},
@@ -531,6 +532,23 @@ function closeModal(id) {
     const errorEl = document.getElementById('manualAllocError');
     if (amountInput) amountInput.value = '';
     if (errorEl) errorEl.textContent = '';
+  } else if (id === 'emiModal') {
+    state.emiPaymentContext = null;
+    const sourceSelect = document.getElementById('emiSourceAccount');
+    const errorEl = document.getElementById('emiError');
+    const fxHint = document.getElementById('emiFxHint');
+    const confirmBtn = document.getElementById('emiConfirmBtn');
+    if (sourceSelect) sourceSelect.innerHTML = '<option value="">-- select bank account --</option>';
+    if (errorEl) errorEl.textContent = '';
+    if (fxHint) fxHint.textContent = '';
+    if (confirmBtn) {
+      confirmBtn.textContent = 'Pay EMI';
+      confirmBtn.disabled = false;
+    }
+    ['emiPreviewLoanAmount', 'emiPreviewDebitAmount', 'emiPreviewRemainingBalance'].forEach(targetId => {
+      const el = document.getElementById(targetId);
+      if (el) el.textContent = '--';
+    });
   }
 }
 
@@ -811,7 +829,7 @@ async function logout() {
   state.buckets = [];
   state.bucketSummary = [];
   state.selectedScope = 'me';
-  ['accountModal', 'bucketModal', 'entryModal', 'manualAllocateModal', 'historyModal'].forEach(closeModal);
+  ['accountModal', 'bucketModal', 'entryModal', 'manualAllocateModal', 'historyModal', 'emiModal'].forEach(closeModal);
   setAppVisibility(false);
   clearOtpPreview();
   updateSessionUi();
@@ -852,7 +870,7 @@ async function checkSession() {
 async function onScopeChange() {
   state.selectedScope = document.getElementById('scopeSelect').value;
   updateReadOnlyUi();
-  ['accountModal', 'bucketModal', 'entryModal', 'manualAllocateModal', 'historyModal'].forEach(closeModal);
+  ['accountModal', 'bucketModal', 'entryModal', 'manualAllocateModal', 'historyModal', 'emiModal'].forEach(closeModal);
   await loadData();
 }
 
@@ -891,6 +909,9 @@ async function _renderDashboard(nw, buckets, recent) {
     const colorMap = { bank: '#10b981', loan: '#f97316', shares: '#6366f1', investment_group: '#3b82f6', metal: '#eab308' };
     const colors = Object.keys(nw.by_type).map(t => colorMap[t] || '#6366f1');
     drawDonut('donutChart', Object.values(nw.by_type), Object.keys(nw.by_type).map(t => typeLabel(t)), colors);
+  } else if (charts.donutChart) {
+    charts.donutChart.destroy();
+    delete charts.donutChart;
   }
 
   const bucketDiv = document.getElementById('bucketSummary');
@@ -1358,7 +1379,7 @@ function renderAccountCard(account, { readOnly, typeColors }) {
           <div class="flex flex-wrap items-center gap-2">
             ${!isMetal ? `<button onclick="openAddEntry(${accountId})" class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">+ Entry</button>` : ''}
             ${!isMetal ? `<button onclick="viewHistory(${accountId})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">History</button>` : ''}
-            ${isLoan ? `<button id="emi-btn-${accountId}" onclick="applyEmi(${accountId})" class="text-xs text-orange-300 hover:text-white px-3 py-1.5 rounded-lg bg-slate-700/80 hover:bg-slate-700 transition-colors">Pay EMI</button>` : ''}
+            ${isLoan ? `<button id="emi-btn-${accountId}" onclick="openEmiModal(${accountId})" class="text-xs text-orange-300 hover:text-white px-3 py-1.5 rounded-lg bg-slate-700/80 hover:bg-slate-700 transition-colors">Pay EMI</button>` : ''}
             ${isMetal ? `<button data-refresh="${accountId}" onclick="refreshPrice(${accountId})" class="text-xs text-yellow-300 hover:text-white px-3 py-1.5 rounded-lg bg-slate-700/80 hover:bg-slate-700 transition-colors">↻ Refresh Price</button>` : ''}
             ${canExpand ? `<button onclick='toggleAccountDetails(${JSON.stringify(accountKey)})' class="text-xs text-slate-300 hover:text-white px-3 py-1.5 rounded-lg bg-slate-700/80 hover:bg-slate-700 transition-colors">${isExpanded ? 'Hide details' : 'Details'}</button>` : ''}
             <button onclick="openAccountModal(${accountId})" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors">Edit</button>
@@ -1641,25 +1662,144 @@ async function refreshPrice(accountId) {
   }
 }
 
-async function applyEmi(accountId) {
-  const btn = document.getElementById(`emi-btn-${accountId}`);
-  if (btn) { btn.textContent = '…'; btn.disabled = true; }
+function emiSourceAccounts() {
+  return state.accounts
+    .filter(account => account.type === 'bank')
+    .sort((a, b) => {
+      const balanceDiff = Number(b.latest_balance || 0) - Number(a.latest_balance || 0);
+      if (Math.abs(balanceDiff) > 1e-9) return balanceDiff;
+      return String(a.name || '').localeCompare(String(b.name || ''));
+    });
+}
+
+function selectDefaultEmiSourceAccount(loan, bankAccounts) {
+  if (!loan || !bankAccounts.length) return '';
+  const emiAmount = Number(loan.monthly_emi || 0);
+  const sameCurrency = bankAccounts.find(account =>
+    account.currency === loan.currency && Number(account.latest_balance || 0) + 1e-9 >= emiAmount
+  );
+  if (sameCurrency) return String(sameCurrency.id);
+
+  const affordable = bankAccounts.find(account => {
+    const debitAmount = convertAmount(emiAmount, loan.currency, account.currency);
+    return Number(account.latest_balance || 0) + 1e-9 >= debitAmount;
+  });
+  return String((affordable || bankAccounts[0]).id);
+}
+
+function openEmiModal(accountId) {
+  if (!requireSingleUserSelection('Switch to My Profile to pay EMI.')) return;
+  const loan = getAccountById(accountId);
+  if (!loan || loan.type !== 'loan') {
+    alert('Loan account not found.');
+    return;
+  }
+  const bankAccounts = emiSourceAccounts();
+  if (!bankAccounts.length) {
+    alert('Add a bank account first so this EMI has a source to debit.');
+    return;
+  }
+
+  state.emiPaymentContext = { loanAccountId: Number(accountId) };
+  document.getElementById('emiModalTitle').textContent = `Pay EMI — ${loan.name}`;
+  document.getElementById('emiLoanHint').textContent = `Select the bank account to debit for ${loan.name}.`;
+  document.getElementById('emiError').textContent = '';
+
+  const select = document.getElementById('emiSourceAccount');
+  select.innerHTML = '<option value="">-- select bank account --</option>';
+  bankAccounts.forEach(account => {
+    const option = document.createElement('option');
+    option.value = String(account.id);
+    option.textContent = `${account.name} • ${moneyInCurrency(Number(account.latest_balance || 0), account.currency)}`;
+    select.appendChild(option);
+  });
+  select.value = selectDefaultEmiSourceAccount(loan, bankAccounts);
+
+  updateEmiPaymentPreview();
+  openModal('emiModal');
+}
+
+function updateEmiPaymentPreview() {
+  const context = state.emiPaymentContext;
+  const loan = getAccountById(context?.loanAccountId);
+  const select = document.getElementById('emiSourceAccount');
+  const errorEl = document.getElementById('emiError');
+  const fxHint = document.getElementById('emiFxHint');
+  const confirmBtn = document.getElementById('emiConfirmBtn');
+  const emiPreview = document.getElementById('emiPreviewLoanAmount');
+  const debitPreview = document.getElementById('emiPreviewDebitAmount');
+  const remainingPreview = document.getElementById('emiPreviewRemainingBalance');
+  if (!loan || !select || !errorEl || !fxHint || !confirmBtn || !emiPreview || !debitPreview || !remainingPreview) return;
+
+  const sourceAccount = getAccountById(parseInt(select.value, 10));
+  const emiAmount = Number(loan.monthly_emi || 0);
+  emiPreview.textContent = moneyInCurrency(emiAmount, loan.currency || 'USD');
+  errorEl.textContent = '';
+  fxHint.textContent = '';
+  confirmBtn.disabled = false;
+
+  if (!(emiAmount > 0)) {
+    debitPreview.textContent = '--';
+    remainingPreview.textContent = '--';
+    errorEl.textContent = 'This loan does not have a monthly EMI set yet.';
+    confirmBtn.disabled = true;
+    return;
+  }
+  if (!sourceAccount) {
+    debitPreview.textContent = '--';
+    remainingPreview.textContent = '--';
+    errorEl.textContent = 'Select the bank account to debit.';
+    confirmBtn.disabled = true;
+    return;
+  }
+
+  const sourceCurrency = sourceAccount.currency || loan.currency || 'USD';
+  const debitAmount = convertAmount(emiAmount, loan.currency, sourceCurrency);
+  const sourceBalance = Number(sourceAccount.latest_balance || 0);
+  const balanceAfter = sourceBalance - debitAmount;
+
+  debitPreview.textContent = moneyInCurrency(debitAmount, sourceCurrency);
+  remainingPreview.textContent = moneyInCurrency(Math.max(balanceAfter, 0), sourceCurrency);
+
+  if (loan.currency !== sourceCurrency) {
+    const fxRate = convertAmount(1, loan.currency, sourceCurrency);
+    fxHint.textContent = `FX applied: 1 ${loan.currency} = ${fxRate.toFixed(6)} ${sourceCurrency}`;
+  }
+
+  if (debitAmount - sourceBalance > 1e-9) {
+    errorEl.textContent = `Insufficient balance in ${sourceAccount.name}. Available: ${moneyInCurrency(sourceBalance, sourceCurrency)}.`;
+    confirmBtn.disabled = true;
+  }
+}
+
+async function applyEmi() {
+  const context = state.emiPaymentContext;
+  const loan = getAccountById(context?.loanAccountId);
+  const sourceAccountId = parseInt(document.getElementById('emiSourceAccount')?.value, 10) || null;
+  const errorEl = document.getElementById('emiError');
+  const confirmBtn = document.getElementById('emiConfirmBtn');
+  if (!loan || !sourceAccountId || !errorEl || !confirmBtn) return;
+
+  errorEl.textContent = '';
+  confirmBtn.textContent = 'Applying...';
+  confirmBtn.disabled = true;
   try {
-    const res = await api(`/api/accounts/${accountId}/apply-emi`, 'POST');
+    const res = await api(`/api/accounts/${loan.id}/apply-emi`, 'POST', {
+      source_account_id: sourceAccountId,
+    });
     if (!res.ok) throw new Error(res.error || 'Unknown error');
-    // Update account in state directly so re-render is instant
-    const idx = state.accounts.findIndex(a => a.id === accountId);
-    if (idx !== -1) state.accounts[idx] = res.account;
-    renderAccounts();
+    closeModal('emiModal');
+    await loadAccounts();
     await loadDashboard();
     const tenure = res.new_tenure;
     const msg = tenure <= 0
       ? `🎉 Loan fully paid off!`
-      : `EMI applied.\n• Principal paid: ${moneyFromStored(res.principal_paid, res.account?.currency)}\n• Interest: ${moneyFromStored(res.interest, res.account?.currency)}\n• Outstanding: ${moneyFromStored(res.new_principal, res.account?.currency)}\n• Months remaining: ${tenure}`;
+      : `EMI applied.\n• Principal paid: ${moneyFromStored(res.principal_paid, res.account?.currency)}\n• Interest: ${moneyFromStored(res.interest, res.account?.currency)}\n• Outstanding: ${moneyFromStored(res.new_principal, res.account?.currency)}\n• Debited from ${res.source_account?.name || 'bank account'}: ${moneyFromStored(res.source_debit_amount, res.source_account?.currency)}\n• Months remaining: ${tenure}`;
     alert(msg);
   } catch (e) {
-    alert(`EMI failed:\n${e.message}`);
-    if (btn) { btn.textContent = 'Pay EMI'; btn.disabled = false; }
+    errorEl.textContent = e.message || 'EMI failed.';
+    confirmBtn.textContent = 'Pay EMI';
+    confirmBtn.disabled = false;
   }
 }
 
@@ -2525,11 +2665,11 @@ async function deleteTransaction(id) {
 
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
-    ['accountModal', 'bucketModal', 'entryModal', 'manualAllocateModal', 'historyModal'].forEach(closeModal);
+    ['accountModal', 'bucketModal', 'entryModal', 'manualAllocateModal', 'historyModal', 'emiModal'].forEach(closeModal);
   }
 });
 
-['accountModal', 'bucketModal', 'entryModal', 'manualAllocateModal', 'historyModal'].forEach(id => {
+['accountModal', 'bucketModal', 'entryModal', 'manualAllocateModal', 'historyModal', 'emiModal'].forEach(id => {
   const el = document.getElementById(id);
   if (!el) return;
   el.addEventListener('click', e => {
@@ -2544,6 +2684,7 @@ document.getElementById('forgotCode').addEventListener('keydown', e => { if (e.k
 document.getElementById('accInstitution').addEventListener('keydown', e => { if (e.key === 'Enter') saveAccount(); });
 document.getElementById('bktTarget').addEventListener('keydown', e => { if (e.key === 'Enter') saveBucket(); });
 document.getElementById('manualAllocAmount').addEventListener('keydown', e => { if (e.key === 'Enter') saveManualBucketAllocation(); });
+document.getElementById('emiSourceAccount').addEventListener('keydown', e => { if (e.key === 'Enter') applyEmi(); });
 
 async function init() {
   switchAuthTab('signin');
